@@ -18,3 +18,4 @@ tqdm==4.66.1
 pillow==10.2.0
 miniupnpc==2.2.3
 psycopg2-binary==2.9.9 
+seaborn==0.13.2 
