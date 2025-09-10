@@ -199,9 +199,14 @@ def is_api_running(host='localhost', port=8000, timeout=1):
     except:
         return False
 
-# 获取API地址和端口
+# 获取API地址和端口（在云端优先使用 localhost，避免内网IP不可达）
 API_HOST = os.getenv("API_HOST", "localhost")
 API_PORT = os.getenv("API_PORT", "8000")
+
+# 在常见云环境（如 Streamlit Cloud、Codespaces）强制回退到 localhost
+_cih = os.getenv("CI"); _sc = os.getenv("STREAMLIT_RUNTIME"); _codespace = os.getenv("CODESPACES") or os.getenv("GITPOD_WORKSPACE_ID")
+if API_HOST not in ("localhost", "127.0.0.1") and (_cih or _sc or _codespace):
+    API_HOST = "localhost"
 API_BASE = f"http://{API_HOST}:{API_PORT}"
 
 # 检查API服务器状态
@@ -212,9 +217,21 @@ if not API_AVAILABLE and os.getenv("AUTO_START_API", "1") == "1":
     try:
         if "_api_started" not in st.session_state:
             st.session_state._api_started = True
-            import subprocess, sys
-            subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
-            time.sleep(1.5)
+            # 在云端优先以内嵌方式启动API，无法则回退到子进程
+            try:
+                if _cih or _sc or _codespace or os.getenv("RUN_IN_PROCESS_API", "1") == "1":
+                    import api_server_local as _api_mod
+                    import uvicorn, threading
+                    config = uvicorn.Config(_api_mod.app, host="127.0.0.1", port=int(API_PORT), log_level="warning")
+                    server = uvicorn.Server(config)
+                    threading.Thread(target=server.run, daemon=True).start()
+                else:
+                    import subprocess, sys
+                    subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
+            except Exception:
+                import subprocess, sys
+                subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
+            time.sleep(2.0)
             API_AVAILABLE = is_api_running(API_HOST, int(API_PORT))
             if API_AVAILABLE:
                 st.toast("本地API已自动启动", icon="✅")
@@ -226,11 +243,11 @@ if not API_AVAILABLE:
     st.warning(f"""
     ⚠️ API服务器（{API_BASE}）未运行或无法连接。某些功能可能不可用。
     
-    请启动API服务器：
+    本地运行：
     ```
-    python api_server.py
+    python run_app.py --api-port {API_PORT}
     ```
-    或
+    或仅启动API：
     ```
     python api_server_local.py
     ```
