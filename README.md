@@ -166,3 +166,39 @@ print(resp.status_code, resp.text)
 - 2023-11-20: 添加了现代化UI和更好的可视化
 - 2023-11-10: 添加了Neon PostgreSQL数据库支持
 - 2023-11-01: 初始版本发布 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@yvzhou1111 ➜ /workspaces/----------- (main) $ python run_app.py
+
+┌─────────────────────────────────────────────────────┐
+│                用户用水行为识别系统               │
+│                   全功能版本                   │
+└─────────────────────────────────────────────────────┘
+    
+[网络] 本机IP地址:
+  - 10.0.6.167
+  - 127.0.0.1
+启动API服务器...
+[API] 2025-09-10 13:06:21,342 - water-meter-api - INFO - 启动API服务器: 0.0.0.0:8000
+[API] INFO:     Started server process [3265]
+[API] INFO:     Waiting for application startup.
+[API] INFO:     Application startup complete.
+[API] INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+[API] API服务器已启动: http://10.0.6.167:8000
+[API] 数据推送地址: http://10.0.6.167:8000/api/data
+启动Streamlit前端...
+[Streamlit] 前端已启动: http://10.0.6.167:8501
+[数据] 开始推送历史数据...
+[API] INFO:     127.0.0.1:59146 - "GET /api/devices/70666000038000 HTTP/1.1" 200 OK

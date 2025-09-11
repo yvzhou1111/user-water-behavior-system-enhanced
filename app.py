@@ -100,6 +100,10 @@ st.markdown("""
     .css-1d391kg {
         background-color: #2c3e50;
     }
+
+    /* 隐藏Streamlit默认多页侧边导航，保留自定义菜单 */
+    div[data-testid="stSidebarNav"], nav[aria-label="Main navigation"] { display: none !important; }
+    ul[data-testid="stSidebarNavItems"] { display: none !important; }
     
     /* 按钮样式 */
     .stButton>button {
@@ -199,9 +203,14 @@ def is_api_running(host='localhost', port=8000, timeout=1):
     except:
         return False
 
-# 获取API地址和端口
+# 获取API地址和端口（在云端优先使用 localhost，避免内网IP不可达）
 API_HOST = os.getenv("API_HOST", "localhost")
 API_PORT = os.getenv("API_PORT", "8000")
+
+# 在常见云环境（如 Streamlit Cloud、Codespaces）强制回退到 localhost
+_cih = os.getenv("CI"); _sc = os.getenv("STREAMLIT_RUNTIME"); _codespace = os.getenv("CODESPACES") or os.getenv("GITPOD_WORKSPACE_ID")
+if API_HOST not in ("localhost", "127.0.0.1") and (_cih or _sc or _codespace):
+    API_HOST = "localhost"
 API_BASE = f"http://{API_HOST}:{API_PORT}"
 
 # 检查API服务器状态
@@ -212,9 +221,21 @@ if not API_AVAILABLE and os.getenv("AUTO_START_API", "1") == "1":
     try:
         if "_api_started" not in st.session_state:
             st.session_state._api_started = True
-            import subprocess, sys
-            subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
-            time.sleep(1.5)
+            # 在云端优先以内嵌方式启动API，无法则回退到子进程
+            try:
+                if _cih or _sc or _codespace or os.getenv("RUN_IN_PROCESS_API", "1") == "1":
+                    import api_server_local as _api_mod
+                    import uvicorn, threading
+                    config = uvicorn.Config(_api_mod.app, host="127.0.0.1", port=int(API_PORT), log_level="warning")
+                    server = uvicorn.Server(config)
+                    threading.Thread(target=server.run, daemon=True).start()
+                else:
+                    import subprocess, sys
+                    subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
+            except Exception:
+                import subprocess, sys
+                subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
+            time.sleep(2.0)
             API_AVAILABLE = is_api_running(API_HOST, int(API_PORT))
             if API_AVAILABLE:
                 st.toast("本地API已自动启动", icon="✅")
@@ -226,11 +247,11 @@ if not API_AVAILABLE:
     st.warning(f"""
     ⚠️ API服务器（{API_BASE}）未运行或无法连接。某些功能可能不可用。
     
-    请启动API服务器：
+    本地运行：
     ```
-    python api_server.py
+    python run_app.py --api-port {API_PORT}
     ```
-    或
+    或仅启动API：
     ```
     python api_server_local.py
     ```
@@ -350,6 +371,7 @@ def render_login():
                     # 将token设置到URL参数中，以便刷新页面时恢复登录状态（新API）
                     st.query_params["token"] = st.session_state.token
                     st.success("登录成功")
+                    st.rerun()
                 else:
                     st.error("登录失败")
             
@@ -492,14 +514,27 @@ def create_enhanced_figure_cn(day_df: pd.DataFrame):
 def render_realtime():
     st.markdown("<h2>实时监测</h2>", unsafe_allow_html=True)
     st.markdown("<div class='section-container'>", unsafe_allow_html=True)
-    sources = ["water_meter_data.csv"]
-    if os.path.exists("device_push_data.csv"):
+    # 数据源优先级：真实推送(device_push_data.csv) > 历史采集(water_meter_data.csv)
+    sources = []
+    has_real = os.path.exists("device_push_data.csv")
+    has_hist = os.path.exists("water_meter_data.csv")
+    if has_real:
         sources.append("device_push_data.csv")
-    ds = st.selectbox("选择数据源", sources, index=0, key="realtime_source")
+    if has_hist:
+        sources.append("water_meter_data.csv")
+    if not sources:
+        sources = ["water_meter_data.csv"]
+    # 默认选择真实数据（若存在）
+    default_index = 0
+    ds = st.selectbox("选择数据源", sources, index=default_index, key="realtime_source", help="优先选择真实推送数据，可手动切换")
 
     df = load_csv_safely(ds)
     if df.empty:
         st.info("暂无数据")
+        # 如果选的是历史数据但存在真实推送数据，自动切换
+        if ds != "device_push_data.csv" and os.path.exists("device_push_data.csv"):
+            st.session_state.realtime_source = "device_push_data.csv"
+            st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
@@ -1116,9 +1151,11 @@ def render_data_admin():
                 lan_ip = info.get("lan_ip_suggest")
                 public_ip = info.get("public_ip")
                 
-                if lan_ip:
-                    st.code(f"http://{lan_ip}:8000/api/data", language="text")
-                    
+                if info.get("lan_ips"):
+                    st.markdown("##### 局域网接收地址")
+                    for ip in info.get("lan_ips", []):
+                        st.code(f"http://{ip}:{info.get('external_port', '8000')}/api/data", language="text")
+                
                 if public_ip:
                     st.markdown("##### 公网接收地址")
                     st.code(f"http://{public_ip}:{info.get('external_port', '8000')}/api/data", language="text")
@@ -1139,8 +1176,8 @@ def render_device_mgmt():
             <h4>如何启动API服务器</h4>
             <p>请在命令行中运行以下命令：</p>
             <pre style="background-color: #eee; padding: 10px; border-radius: 5px;">
-python api_server.py
-# 或
+python run_app.py --api-port 8000
+# 或仅启动API
 python api_server_local.py
             </pre>
             <p>启动后，刷新此页面即可使用设备管理功能</p>
@@ -1151,22 +1188,9 @@ python api_server_local.py
         return
     
     info = api_get("/public_info")
-    if info and not info.get("db_enabled"):
-        st.warning("未配置数据库(NEON_URL/DATABASE_URL)，设备管理接口不可用", icon="⚠️")
-        
-        st.markdown("""
-        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h4>如何配置数据库</h4>
-            <p>请在环境变量中设置以下参数:</p>
-            <pre style="background-color: #eee; padding: 10px; border-radius: 5px;">
-NEON_URL=postgresql://user:password@hostname/dbname
-            </pre>
-            <p>或者在 .env 文件中添加上述配置</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+    # 本地存储版不再依赖数据库，若检测到 db_enabled=False，提示为“本地存储已启用”，不阻断设备管理
+    if info and info.get("storage_type") == "local_file":
+        st.info("使用本地文件存储，数据库配置已禁用（无需 NEON_URL/DATABASE_URL）")
 
     # 两个标签页：设备列表和设备详情
     tabs = st.tabs(["设备列表", "设备管理", "批量导入"])
@@ -1278,7 +1302,7 @@ NEON_URL=postgresql://user:password@hostname/dbname
                                 # 可以跳转到历史查询页面并预填设备号
                                 st.session_state.nav = "历史查询"
                                 st.session_state.device_filter = selected_device['deviceNo']
-                                st.experimental_rerun()
+                                st.rerun()
                         with action_col2:
                             status_action = "停用设备" if selected_device['is_active'] else "激活设备"
                             if st.button(status_action, key="toggle_status", width="stretch"): 
@@ -1290,7 +1314,7 @@ NEON_URL=postgresql://user:password@hostname/dbname
                                 if ok:
                                     st.success(f"设备已{'停用' if selected_device['is_active'] else '激活'}")
                                     # 刷新页面
-                                    st.experimental_rerun()
+                                    st.rerun()
         else:
             st.info("暂无设备或无法连接接口")
     
@@ -1513,10 +1537,11 @@ else:
         # 数据库状态
         info = api_get("/public_info")
         if info:
-            db_status = "已连接 ✅" if info.get("db_enabled") else "未连接 ❌"
+            storage = info.get("storage_type", "local_file")
+            storage_text = "本地文件存储" if storage == "local_file" else "数据库"
             st.markdown(f"""
             <div style="font-size: 0.8rem; margin-top: 20px; color: #DDD;">
-                <p>数据库状态: {db_status}</p>
+                <p>存储方式: {storage_text}</p>
                 <p>API端口: {info.get('external_port', '8000')}</p>
             </div>
             """, unsafe_allow_html=True)
@@ -1528,7 +1553,7 @@ else:
             st.session_state.username = None
             if "token" in st.query_params:
                 del st.query_params["token"]
-            st.experimental_rerun()
+            st.rerun()
      
     # 主内容区域
     if selected == "实时监测":
