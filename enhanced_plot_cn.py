@@ -256,9 +256,5 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
         fig.set_constrained_layout(True)
     except Exception:
         pass
-    try:
-        fig.tight_layout()
-        fig.subplots_adjust(top=0.92)
-    except Exception:
-        pass
+    # 统一使用 constrained_layout，移除 tight_layout/subplots_adjust 以避免兼容性警告
     return fig 
