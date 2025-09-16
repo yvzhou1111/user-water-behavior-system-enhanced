@@ -13,9 +13,53 @@ from dotenv import load_dotenv
 import time
 import socket
 import enhanced_plot_cn as enhanced_cn
+import numpy as np
+
 # 中文字体与负号
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
+
+# 动态确保中文字体（云端补齐 Noto Sans SC）
+def ensure_chinese_font():
+    try:
+        import matplotlib
+        from matplotlib import font_manager
+        available = {f.name for f in font_manager.fontManager.ttflist}
+        preferred = ['Noto Sans CJK SC', 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+        for fam in preferred:
+            if fam in available:
+                plt.rcParams['font.sans-serif'] = [fam, 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
+                plt.rcParams['axes.unicode_minus'] = False
+                return fam
+        # 下载并注册 Noto Sans SC
+        font_dir = os.path.join(os.path.dirname(__file__), 'fonts')
+        os.makedirs(font_dir, exist_ok=True)
+        font_path = os.path.join(font_dir, 'NotoSansSC-Regular.otf')
+        if not os.path.exists(font_path):
+            urls = [
+                'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
+                'https://fonts.gstatic.com/ea/notosanssc/v1/NotoSansSC-Regular.otf'
+            ]
+            import urllib.request
+            for u in urls:
+                try:
+                    urllib.request.urlretrieve(u, font_path)
+                    break
+                except Exception:
+                    continue
+        if os.path.exists(font_path):
+            font_manager.fontManager.addfont(font_path)
+            # 名称可能为 Noto Sans CJK SC 或 Noto Sans SC，均加入
+            plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC', 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
+            plt.rcParams['axes.unicode_minus'] = False
+            return 'Noto Sans SC'
+    except Exception:
+        pass
+    plt.rcParams['axes.unicode_minus'] = False
+    return None
+
+# 预先确保中文字体
+ensure_chinese_font()
 
 # Load environment variables
 load_dotenv()
@@ -203,18 +247,69 @@ def is_api_running(host='localhost', port=8000, timeout=1):
     except:
         return False
 
+# 端口工具：检测可用端口并动态选择
+import contextlib
+
+def is_port_free(host: str = "127.0.0.1", port: int = 8000) -> bool:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        with contextlib.closing(s):
+            s.bind((host, port))
+        return True
+    except OSError:
+        return False
+
+def is_port_free_any(port: int) -> bool:
+    hosts = ["127.0.0.1", "0.0.0.0"]
+    for h in hosts:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            with contextlib.closing(s):
+                s.bind((h, port))
+        except OSError:
+            return False
+    return True
+
+def find_free_port(start_port: int = 8000, max_tries: int = 50) -> int:
+    p = start_port
+    for _ in range(max_tries):
+        if is_port_free_any(p):
+            return p
+        p += 1
+    # 兜底：让系统分配
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with contextlib.closing(s):
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+def _set_api_port(new_port: int):
+    global API_PORT, API_BASE
+    API_PORT = str(new_port)
+    os.environ["API_PORT"] = API_PORT
+    os.environ["EXTERNAL_PORT"] = API_PORT
+    API_BASE = f"http://{API_HOST}:{API_PORT}"
+
 # 获取API地址和端口（在云端优先使用 localhost，避免内网IP不可达）
 API_HOST = os.getenv("API_HOST", "localhost")
 API_PORT = os.getenv("API_PORT", "8000")
 
+# 若本地端口已占用，预先切换到可用端口
+if API_HOST in ("localhost", "127.0.0.1") and not is_port_free_any(int(API_PORT)):
+    _set_api_port(find_free_port(int(API_PORT)))
+
 # 在常见云环境（如 Streamlit Cloud、Codespaces）强制回退到 localhost
-_cih = os.getenv("CI"); _sc = os.getenv("STREAMLIT_RUNTIME"); _codespace = os.getenv("CODESPACES") or os.getenv("GITPOD_WORKSPACE_ID")
-if API_HOST not in ("localhost", "127.0.0.1") and (_cih or _sc or _codespace):
+_cih = os.getenv("CI"); _sc = os.getenv("STREAMLIT_RUNTIME"); _sc2 = os.getenv("STREAMLIT_SERVER_PORT"); _codespace = os.getenv("CODESPACES") or os.getenv("GITPOD_WORKSPACE_ID")
+if API_HOST not in ("localhost", "127.0.0.1") and (_cih or _sc or _sc2 or _codespace):
     API_HOST = "localhost"
 API_BASE = f"http://{API_HOST}:{API_PORT}"
 
 # 检查API服务器状态
 API_AVAILABLE = is_api_running(API_HOST, int(API_PORT))
+
+# 若端口占用，动态切换端口
+if not API_AVAILABLE and API_HOST in ("localhost", "127.0.0.1") and not is_port_free_any(int(API_PORT)):
+    _set_api_port(find_free_port(int(API_PORT)))
+    API_AVAILABLE = is_api_running(API_HOST, int(API_PORT))
 
 # 若未运行且允许自动启动，则尝试启动一次
 if not API_AVAILABLE and os.getenv("AUTO_START_API", "1") == "1":
@@ -223,24 +318,58 @@ if not API_AVAILABLE and os.getenv("AUTO_START_API", "1") == "1":
             st.session_state._api_started = True
             # 在云端优先以内嵌方式启动API，无法则回退到子进程
             try:
-                if _cih or _sc or _codespace or os.getenv("RUN_IN_PROCESS_API", "1") == "1":
+                if (_cih or _sc or _codespace) and os.name != "nt" and os.getenv("RUN_IN_PROCESS_API", "1") == "1":
                     import api_server_local as _api_mod
+                    try:
+                        _api_mod.local_storage.init_storage()
+                    except Exception:
+                        pass
                     import uvicorn, threading
-                    config = uvicorn.Config(_api_mod.app, host="127.0.0.1", port=int(API_PORT), log_level="warning")
+                    _port_int = int(API_PORT)
+                    if not is_port_free_any(_port_int):
+                        _set_api_port(find_free_port(_port_int))
+                        _port_int = int(API_PORT)
+                    config = uvicorn.Config(_api_mod.app, host="127.0.0.1", port=_port_int, log_level="warning")
                     server = uvicorn.Server(config)
                     threading.Thread(target=server.run, daemon=True).start()
                 else:
                     import subprocess, sys
-                    subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
+                    env2 = os.environ.copy()
+                    env2["API_PORT"] = API_PORT
+                    env2["EXTERNAL_PORT"] = API_PORT
+                    env2["API_HOST"] = "0.0.0.0"
+                    subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=env2)
             except Exception:
                 import subprocess, sys
-                subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=os.environ.copy())
-            time.sleep(2.0)
-            API_AVAILABLE = is_api_running(API_HOST, int(API_PORT))
+                env2 = os.environ.copy()
+                env2["API_PORT"] = API_PORT
+                env2["EXTERNAL_PORT"] = API_PORT
+                env2["API_HOST"] = "0.0.0.0"
+                subprocess.Popen([sys.executable, "api_server_local.py"], creationflags=0, env=env2)
+            # 等待API启动，最多等待10秒
+            max_wait_s = 10
+            waited = 0.0
+            while waited < max_wait_s:
+                if is_api_running(API_HOST, int(API_PORT)):
+                    API_AVAILABLE = True
+                    break
+                time.sleep(0.5)
+                waited += 0.5
             if API_AVAILABLE:
                 st.toast("本地API已自动启动", icon="✅")
     except Exception:
         pass
+
+# 若仍不可用，使用应用内 TestClient 直接调用 FastAPI
+INPROC_CLIENT = None
+if not API_AVAILABLE:
+    try:
+        import api_server_local as _api_mod
+        from starlette.testclient import TestClient
+        INPROC_CLIENT = TestClient(_api_mod.app)
+        API_AVAILABLE = True
+    except Exception:
+        INPROC_CLIENT = None
 
 # 显示API状态提示
 if not API_AVAILABLE:
@@ -259,6 +388,12 @@ if not API_AVAILABLE:
 
 # API工具函数
 def api_get(path: str, timeout: int = 2):
+    if INPROC_CLIENT is not None:
+        try:
+            r = INPROC_CLIENT.get(path, timeout=timeout)
+            return r.json()
+        except Exception:
+            return None
     if not API_AVAILABLE:
         return None
     try:
@@ -271,6 +406,19 @@ def api_get(path: str, timeout: int = 2):
         return None
 
 def api_post(path: str, json_body: dict, timeout: int = 2):
+    if INPROC_CLIENT is not None:
+        try:
+            r = INPROC_CLIENT.post(path, json=json_body, timeout=timeout)
+            try:
+                r_json = r.json()
+            except Exception:
+                r_json = None
+            if r.status_code >= 400:
+                st.warning(f"API请求失败: POST {path} - {r_json or r.text}")
+                return None
+            return r_json
+        except Exception:
+            return None
     if not API_AVAILABLE:
         return None
     try:
@@ -350,9 +498,9 @@ def render_login():
             
             col1, col2 = st.columns(2)
             with col1:
-                submitted = st.form_submit_button("登录", width="stretch")
+                submitted = st.form_submit_button("登录")
             with col2:
-                demo = st.form_submit_button("演示模式", width="stretch")
+                demo = st.form_submit_button("演示模式")
             
             if submitted:
                 if not u or not p:
@@ -390,123 +538,237 @@ def render_login():
 # -------- 公共分析函数 --------
 
 def compute_intervals(day_df: pd.DataFrame) -> pd.DataFrame:
-    """基于单日数据计算区间流量与用水行为分类。
-    要求包含列：上报时间、累计流量。
-    返回包含：区间流量(升)、用水行为、时间计算 等列。
-    """
+    """基于单日数据计算区间流量与用水行为分类（相邻差值）。"""
     if day_df.empty:
         return pd.DataFrame()
     df = day_df.copy().sort_values('上报时间')
-    # 计算相邻点的差值（升）
     df['错位流量'] = df['累计流量'].shift(-1)
     df['区间流量'] = 1000.0 * (df['累计流量'] - df['错位流量'])
-    # 过滤正向有效区间
     df = df[pd.notna(df['区间流量'])]
     df = df[df['区间流量'] > 0]
-    # 时间列
     df['时间计算'] = df['上报时间'].dt.strftime('%H:%M:%S')
-    # 行为分类
     df['用水行为'] = '零星用水'
     df.loc[df['区间流量'] > 25.0, '用水行为'] = '冲洗用水'
     df.loc[(df['区间流量'] > 6.5) & (df['区间流量'] <= 25.0), '用水行为'] = '桶箱用水'
     return df
 
-def create_enhanced_figure_cn(day_df: pd.DataFrame):
-    if day_df is None or day_df.empty or '上报时间' not in day_df.columns or '累计流量' not in day_df.columns:
-        return None
+# 与 water_analysis_enhanced_en.py 逻辑一致的关键点区间计算：相邻时间差>360秒 + 首点
+# 输出列：上报时间、时间计算、区间流量(取绝对值)、用水行为
+
+def compute_intervals_keypoints(day_df: pd.DataFrame) -> pd.DataFrame:
+    if day_df.empty or '上报时间' not in day_df.columns or '累计流量' not in day_df.columns:
+        return pd.DataFrame()
     df = day_df.copy().sort_values('上报时间')
-    # 确保数值列
-    for c in ['累计流量','温度','电池电压','信号值','瞬时流量']:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-    # L/s 由 m³/h 换算
-    if '瞬时流量' in df.columns:
-        df['数据L/s'] = df['瞬时流量'] / 3.6
-    else:
-        df['数据L/s'] = None
-    # 关键点筛选：相邻时间差 > 360 秒
     df['prev_time'] = df['上报时间'].shift(1)
     df['时间差秒'] = (df['上报时间'] - df['prev_time']).dt.total_seconds()
     wm2 = df[df['时间差秒'] > 360].copy()
     if not df.empty:
         wm2 = pd.concat([wm2, df.iloc[[0]]], ignore_index=True)
         wm2 = wm2.sort_values('上报时间').reset_index(drop=True)
-    # 区间流量
     wm2['错位流量'] = wm2['累计流量'].shift(-1)
     wm2['区间流量'] = 1000.0 * (wm2['累计流量'] - wm2['错位流量'])
     wm2 = wm2[pd.notna(wm2['区间流量'])]
-    # 行为分类
+    wm2['区间流量'] = wm2['区间流量'].abs()
+    wm2['时间计算'] = wm2['上报时间'].dt.strftime('%H:%M:%S')
     wm2['用水行为'] = '零星用水'
     wm2.loc[wm2['区间流量'] > 25.0, '用水行为'] = '冲洗用水'
     wm2.loc[(wm2['区间流量'] > 6.5) & (wm2['区间流量'] <= 25.0), '用水行为'] = '桶箱用水'
-    # 时间轴（按日）
-    base_date = pd.Timestamp('1900-01-01')
-    def to_daytime(ts: pd.Timestamp):
-        return base_date.replace(hour=ts.hour, minute=ts.minute, second=ts.second)
-    t_all = df['上报时间'].apply(to_daytime)
-    t_key = wm2['上报时间'].apply(to_daytime) if not wm2.empty else pd.Series([], dtype='datetime64[ns]')
+    return wm2
 
-    fig = plt.figure(figsize=(14, 9), dpi=100)
+def create_enhanced_figure_cn(day_df: pd.DataFrame):
+    if day_df is None or day_df.empty or '上报时间' not in day_df.columns:
+        return None
+
+    df = day_df.copy().dropna(subset=['上报时间'])
+    df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
+    df = df.dropna(subset=['上报时间'])
+
+    # 准备必要列
+    if '数据L/s' not in df.columns:
+        if '瞬时流量' in df.columns:
+            df['数据L/s'] = pd.to_numeric(df['瞬时流量'], errors='coerce') / 3.6
+        else:
+            df['数据L/s'] = 0.0
+    for c in ['累计流量', '温度', '电池电压', '信号值', '数据L/s']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # 与 water_analysis_enhanced_en.py 一致：使用"时间计算"为 time 对象，按时间倒序进行关键点筛选
+    df['时间计算'] = df['上报时间'].dt.time
+    wm_data1 = df.sort_values(by='时间计算', ascending=False).copy()
+
+    def time_diff_seconds(t1, t2):
+        if pd.isna(t1) or pd.isna(t2):
+            return 0
+        s1 = t1.hour * 3600 + t1.minute * 60 + t1.second
+        s2 = t2.hour * 3600 + t2.minute * 60 + t2.second
+        diff = s1 - s2
+        if diff < 0:
+            diff += 24 * 3600
+        return diff
+
+    wm_data1['错位时间'] = wm_data1['时间计算'].shift(1)
+    wm_data1['时间差秒'] = wm_data1.apply(lambda r: time_diff_seconds(r['错位时间'], r['时间计算']), axis=1)
+
+    # 关键点：前后时间差 > 360 秒，并追加首行（倒序的第一行）
+    wm_data2 = wm_data1[wm_data1['时间差秒'] > 360].copy()
+    if not wm_data1.empty:
+        wm_data2 = pd.concat([wm_data2, wm_data1.head(1)], ignore_index=True)
+        wm_data2 = wm_data2.sort_values(by='时间计算', ascending=False).reset_index(drop=True)
+
+    # 计算区间流量与用水行为（与脚本一致）
+    if not wm_data2.empty:
+        wm_data2['错位流量'] = wm_data2['累计流量'].shift(-1)
+        wm_data2['区间流量'] = 1000.0 * (wm_data2['累计流量'] - wm_data2['错位流量'])
+        wm_data2['用水行为'] = ''
+        wm_data2.loc[wm_data2['区间流量'] > 25, '用水行为'] = '冲洗用水'
+        wm_data2.loc[(wm_data2['区间流量'] > 6.5) & (wm_data2['区间流量'] <= 25), '用水行为'] = '桶箱用水'
+        wm_data2.loc[wm_data2['区间流量'] <= 6.5, '用水行为'] = '零星用水'
+        # 颜色与最后一行删除（与脚本一致）
+        wm_data2['颜色'] = ''
+        wm_data2.loc[wm_data2['用水行为'] == '冲洗用水', '颜色'] = '#FF9999'
+        wm_data2.loc[wm_data2['用水行为'] == '桶箱用水', '颜色'] = '#66B2FF'
+        wm_data2.loc[wm_data2['用水行为'] == '零星用水', '颜色'] = '#99CC99'
+        if len(wm_data2) > 0:
+            wm_data2.drop(wm_data2.index[-1], inplace=True)
+
+    # 将 time 转换为同一日期，便于 Matplotlib 绘制
+    base_date = pd.Timestamp('1900-01-01')
+
+    def time_to_datetime(t):
+        try:
+            return base_date.replace(hour=t.hour, minute=t.minute, second=t.second)
+        except Exception:
+            return base_date
+
+    time_all = np.array([time_to_datetime(t) for t in wm_data1['时间计算'].values])
+    acc_flow = wm_data1['累计流量'].values if '累计流量' in wm_data1.columns else np.zeros(len(time_all))
+    flow_rate = wm_data1['数据L/s'].values if '数据L/s' in wm_data1.columns else np.zeros(len(time_all))
+    temperature = wm_data1['温度'].values if '温度' in wm_data1.columns else np.zeros(len(time_all))
+    battery = wm_data1['电池电压'].values if '电池电压' in wm_data1.columns else np.zeros(len(time_all))
+    signal = wm_data1['信号值'].values if '信号值' in wm_data1.columns else np.zeros(len(time_all))
+
+    if not wm_data2.empty:
+        time2 = np.array([time_to_datetime(t) for t in wm_data2['时间计算'].values])
+        acc_flow2 = wm_data2['累计流量'].values
+        inter_flow = wm_data2['区间流量'].values
+        activity = wm_data2['用水行为'].values
+        colors = wm_data2['颜色'].values
+    else:
+        time2 = []
+        acc_flow2 = []
+        inter_flow = []
+        activity = []
+        colors = []
+
+    # 开始绘图：与脚本一致的三联图风格（中文标签）
+    fig = plt.figure(figsize=(16, 10), dpi=120)
+    fig.patch.set_facecolor('#FFFFFF')
     gs = fig.add_gridspec(3, 1, height_ratios=[3, 1, 1], hspace=0.3)
 
-    # 子图1：累计流量 + 瞬时流量
+    # 子图1：累计 + 瞬时 + 关键点气泡
     ax1 = fig.add_subplot(gs[0, 0])
-    ax1.plot(t_all, df['累计流量'], color='#1f77b4', linewidth=1.5, label='累计流量(m³)')
-    ax1.scatter(t_all, df['累计流量'], c='#1f77b4', s=10, alpha=0.5)
-    if not wm2.empty:
-        sizes = wm2['区间流量'].abs().clip(upper=200) * 2
-        colors = wm2['用水行为'].map({'冲洗用水':'#FF9999','桶箱用水':'#66B2FF','零星用水':'#99CC99'}).fillna('#999999')
-        ax1.scatter(t_key, wm2['累计流量'], c=colors, s=sizes, edgecolors='black', linewidths=0.5, alpha=0.8)
-    ax1.set_ylabel('累计流量 (m³)', fontsize=12, color='#1f77b4')
-    ax1.tick_params(axis='y', labelcolor='#1f77b4')
-    ax1.grid(True, linestyle='--', alpha=0.5)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    # 次轴：L/s
+    ax1.set_facecolor('#F8F9FA')
+    ax1.plot(time_all, acc_flow, color='#3498DB', linewidth=2.0, label='累计流量')
+    ax1.scatter(time_all, acc_flow, c='#3498DB', s=20, alpha=0.7, zorder=5)
+    ax1.set_ylabel('累计流量 (m^3)', fontsize=13, color='#3498DB', fontweight='bold')
+    ax1.grid(True, linestyle='--', alpha=0.7, color='#E0E0E0')
+
+    # 关键点气泡与标注
+    if len(inter_flow) > 0:
+        count_map = {'冲洗用水': 0, '桶箱用水': 0, '零星用水': 0}
+        for t, f, act, col, vol in zip(time2, acc_flow2, activity, colors, inter_flow):
+            if pd.notna(vol) and abs(vol) > 0:
+                ax1.scatter(t, f, c=col, s=100 * abs(vol), marker='o', alpha=.8,
+                            edgecolor='black', linewidth=0.8, zorder=10)
+                count_map[act] = count_map.get(act, 0) + 1
+                if abs(vol) > 10:
+                    time_str = pd.Timestamp(t).strftime('%H:%M')
+                    ax1.annotate(f"{abs(vol):.1f}L ({time_str})",
+                                 xy=(t, f), xytext=(10, 10 if (count_map[act] % 2 == 0) else -20),
+                                 textcoords='offset points', fontsize=10,
+                                 bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='gray', alpha=0.9),
+                                 arrowprops=dict(arrowstyle='->', color='gray', lw=1.2), zorder=11)
+
+    # 双轴：瞬时流量
     ax1b = ax1.twinx()
-    if '数据L/s' in df.columns:
-        ax1b.plot(t_all, df['数据L/s'], color='#ff7f0e', linestyle='--', linewidth=1, alpha=0.8, label='瞬时流量(L/s)')
-        ax1b.scatter(t_all, df['数据L/s'], c='#ff7f0e', s=20, marker='x', linewidth=1)
-    ax1b.set_ylabel('瞬时流量 (L/s)', fontsize=12, color='#ff7f0e')
-    ax1b.tick_params(axis='y', labelcolor='#ff7f0e')
+    ax1b.plot(time_all, flow_rate, color='#E74C3C', linestyle='-', linewidth=1.5, alpha=0.8)
+    ax1b.scatter(time_all, flow_rate, c='#E74C3C', s=25, marker='x', linewidth=1.5, alpha=0.8)
+    ax1b.set_ylabel('瞬时流量 (L/s)', fontsize=13, color='#E74C3C', fontweight='bold')
+
+    # x 轴格式
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+    plt.setp(ax1.get_xticklabels(), rotation=45, ha='right', fontsize=10)
 
     # 图例
-    legend_elements = [
-        Line2D([0], [0], color='#1f77b4', lw=2, label='累计流量(m³)'),
-        Line2D([0], [0], color='#ff7f0e', lw=2, linestyle='--', label='瞬时流量(L/s)'),
+    legends = [
+        Line2D([0],[0], color='#3498DB', lw=2, label='累计流量 (m^3)'),
+        Line2D([0],[0], color='#E74C3C', lw=2, linestyle='-', label='瞬时流量 (L/s)'),
         Patch(facecolor='#FF9999', edgecolor='black', label='冲洗用水'),
         Patch(facecolor='#66B2FF', edgecolor='black', label='桶箱用水'),
         Patch(facecolor='#99CC99', edgecolor='black', label='零星用水')
     ]
-    ax1.legend(handles=legend_elements, loc='upper left', fontsize=10, framealpha=0.6)
+    legend = ax1.legend(handles=legends, loc='upper left', fontsize=11, framealpha=0.9,
+                        bbox_to_anchor=(0.01, 0.99), ncol=2, fancybox=True, shadow=True)
+    legend.get_frame().set_linewidth(1.0)
+    legend.get_frame().set_edgecolor('gray')
 
     # 子图2：温度
     ax2 = fig.add_subplot(gs[1, 0])
-    if '温度' in df.columns:
-        ax2.plot(t_all, df['温度'], color='#d62728', linewidth=1.5)
-        ax2.scatter(t_all, df['温度'], c='#d62728', s=15, alpha=0.7)
-    ax2.set_ylabel('温度 (°C)', fontsize=12, color='#d62728')
-    ax2.tick_params(axis='y', labelcolor='#d62728')
-    ax2.grid(True, linestyle='--', alpha=0.5)
+    ax2.set_facecolor('#F8F9FA')
+    ax2.plot(time_all, temperature, color='#E67E22', linewidth=2.0)
+    ax2.scatter(time_all, temperature, c='#E67E22', s=25, marker='o', alpha=0.8)
+    ax2.set_ylabel('温度 (°C)', fontsize=13, color='#E67E22', fontweight='bold')
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax2.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+    plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
 
     # 子图3：电池电压 + 信号
     ax3 = fig.add_subplot(gs[2, 0])
-    if '电池电压' in df.columns:
-        ax3.plot(t_all, df['电池电压'], color='#2ca02c', linewidth=1.5, label='电池电压(V)')
-        ax3.scatter(t_all, df['电池电压'], c='#2ca02c', s=15, alpha=0.7)
-    ax3.set_ylabel('电池电压 (V)', fontsize=12, color='#2ca02c')
-    ax3.tick_params(axis='y', labelcolor='#2ca02c')
-    ax3.grid(True, linestyle='--', alpha=0.5)
-    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    ax3b = ax3.twinx()
-    if '信号值' in df.columns:
-        ax3b.plot(t_all, df['信号值'], color='#9467bd', linestyle='--', linewidth=1.2, alpha=0.8, label='信号强度(dBm)')
-        ax3b.scatter(t_all, df['信号值'], c='#9467bd', s=15, marker='^', alpha=0.7)
-    ax3b.set_ylabel('信号强度 (dBm)', fontsize=12, color='#9467bd')
-    ax3b.tick_params(axis='y', labelcolor='#9467bd')
+    ax3.set_facecolor('#F8F9FA')
+    ax3.plot(time_all, battery, color='#2CA02C', linewidth=2.0, label='电池电压')
+    ax3.scatter(time_all, battery, c='#2CA02C', s=25, marker='o', alpha=0.8)
+    ax3.set_ylabel('电池电压 (V)', fontsize=12, color='#2CA02C')
 
-    fig.suptitle('增强图（中文）', fontsize=16, y=0.98)
-    plt.tight_layout()
+    ax3b = ax3.twinx()
+    ax3b.plot(time_all, signal, color='#9467BD', linestyle='--', linewidth=1.5, alpha=0.7, label='信号强度')
+    ax3b.scatter(time_all, signal, c='#9467BD', s=15, marker='^', alpha=0.7)
+    ax3b.set_ylabel('信号强度 (dBm)', fontsize=12, color='#9467BD')
+
+    lines1, labels1 = ax3.get_legend_handles_labels()
+    lines2, labels2 = ax3b.get_legend_handles_labels()
+    ax3.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
+
+    # 总标题与统计信息
+    title_date = df['上报时间'].dt.date.iloc[0].strftime('%Y-%m-%d') if not df.empty else ''
+    fig.suptitle(f"用水行为分析图 - {title_date}", fontsize=20, y=0.98)
+
+    if not wm_data2.empty:
+        total_usage = abs(wm_data2['区间流量']).sum()
+        wash_usage = abs(wm_data2.loc[wm_data2['用水行为'] == '冲洗用水', '区间流量']).sum()
+        bucket_usage = abs(wm_data2.loc[wm_data2['用水行为'] == '桶箱用水', '区间流量']).sum()
+        small_usage = abs(wm_data2.loc[wm_data2['用水行为'] == '零星用水', '区间流量']).sum()
+        if total_usage <= 0:
+            total_usage = 1.0
+        stats_text = (
+            f"总用水量: {total_usage:.1f}L\n"
+            f"冲洗用水: {wash_usage:.1f}L ({wash_usage/total_usage*100:.1f}%)\n"
+            f"桶箱用水: {bucket_usage:.1f}L ({bucket_usage/total_usage*100:.1f}%)\n"
+            f"零星用水: {small_usage:.1f}L ({small_usage/total_usage*100:.1f}%)"
+        )
+        fig.text(0.02, 0.02, stats_text, fontsize=10,
+                 bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+
+    # 布局
+    try:
+        fig.set_constrained_layout(True)
+    except Exception:
+        pass
+    try:
+        plt.tight_layout()
+    except Exception:
+        pass
     return fig
 
 # -------- 实时监测 --------
@@ -553,7 +815,7 @@ def render_realtime():
         val = latest.get('累计流量')
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
         st.markdown(f"<div class='metric-value'>{val:.3f}</div>" if pd.notna(val) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>累计流量(m³)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>累计流量(m^3)</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
     with col2:
         today = date.today()
@@ -583,13 +845,13 @@ def render_realtime():
         avg_q = df['瞬时流量'].mean() if '瞬时流量' in df.columns else None
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
         st.markdown(f"<div class='metric-value'>{avg_q:.4f}</div>" if pd.notna(avg_q) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>平均瞬时流量(m³/h)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>平均瞬时流量(m^3/h)</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
     with col4:
         max_q = df['瞬时流量'].max() if '瞬时流量' in df.columns else None
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
         st.markdown(f"<div class='metric-value'>{max_q:.4f}</div>" if pd.notna(max_q) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>最大瞬时流量(m³/h)</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>最大瞬时流量(m^3/h)</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -597,7 +859,7 @@ def render_realtime():
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.65, 0.35], subplot_titles=("累计与瞬时流量", "温度与电池"))
     if '累计流量' in df.columns:
-        fig.add_trace(go.Scatter(x=df['上报时间'], y=df['累计流量'], mode='lines+markers', name='累计流量(m³)', line=dict(color='#3498db', width=2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['上报时间'], y=df['累计流量'], mode='lines+markers', name='累计流量(m^3)', line=dict(color='#3498db', width=2)), row=1, col=1)
     if '瞬时流量' in df.columns:
         fig.add_trace(go.Scatter(x=df['上报时间'], y=df['瞬时流量'], mode='lines+markers', name='瞬时流量(m³/h)', line=dict(color='#e74c3c', width=2, dash='dot')), row=1, col=1)
     if '温度' in df.columns:
@@ -617,7 +879,7 @@ def render_realtime():
         xaxis2=dict(gridcolor='#f0f0f0', showgrid=True),
         yaxis2=dict(gridcolor='#f0f0f0', showgrid=True)
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     # 中文增强图（与历史页一致风格）
     st.markdown("<div class='card-title'>增强图（中文）</div>", unsafe_allow_html=True)
@@ -632,21 +894,22 @@ def render_realtime():
     except Exception as e:
         st.warning(f"增强图绘制失败: {e}")
     
-    # 添加自动刷新功能
+    # 添加可选自动刷新功能（默认关闭）
     st.markdown("<div class='card-title'>数据自动刷新</div>", unsafe_allow_html=True)
-    refresh_interval = st.slider("刷新间隔(秒)", min_value=5, max_value=60, value=30, step=5)
-    st.markdown(f"""
-    <div style='margin-top: 10px;'>
-        <meta http-equiv="refresh" content="{refresh_interval}">
-        <p>数据每 {refresh_interval} 秒自动刷新一次</p>
-        <p>最后更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-    </div>
-    """, unsafe_allow_html=True)
+    enable_auto = st.checkbox("启用自动刷新", key="auto_refresh_enabled", value=False)
+    refresh_interval = st.slider("刷新间隔(秒)", min_value=5, max_value=120, value=30, step=5, disabled=not enable_auto)
+    st.markdown(f"<p>最后更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>", unsafe_allow_html=True)
+    if enable_auto:
+        placeholder = st.empty()
+        with placeholder.container():
+            st.info(f"将在 {refresh_interval} 秒后刷新……")
+        time.sleep(refresh_interval)
+        st.rerun()
     
     # 最新数据点
     st.markdown("<div class='card-title'>最新数据</div>", unsafe_allow_html=True)
     last_points = df.tail(5).sort_values('上报时间', ascending=False)
-    st.dataframe(last_points, width="stretch", height=200)
+    st.dataframe(last_points, use_container_width=True, height=200)
     
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -676,7 +939,8 @@ def render_history():
         return
         
     day_df = df[df['上报时间'].dt.date == sel]
-    iv = compute_intervals(day_df)
+    # 使用关键点算法，确保与增强图一致
+    iv = compute_intervals_keypoints(day_df)
 
     st.markdown("<div class='card-title'>用水趋势分析</div>", unsafe_allow_html=True)
     col1, col2 = st.columns([2, 1])
@@ -684,7 +948,7 @@ def render_history():
         # 趋势 + 区间柱状
         fig = make_subplots(rows=1, cols=1)
         fig.add_trace(go.Scatter(x=day_df['上报时间'], y=day_df['累计流量'], mode='lines+markers', 
-                                name='累计流量(m³)', line=dict(color='#3498db', width=2)))
+                                name='累计流量(m^3)', line=dict(color='#3498db', width=2)))
         if not iv.empty:
             fig.add_trace(go.Bar(x=day_df['上报时间'].iloc[:len(iv)], y=iv['区间流量'], 
                                 name='区间用水量(L)', marker_color='rgba(52, 152, 219, 0.5)'))
@@ -697,25 +961,26 @@ def render_history():
             xaxis=dict(gridcolor='#f0f0f0', showgrid=True),
             yaxis=dict(gridcolor='#f0f0f0', showgrid=True)
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
     with col2:
         st.markdown("<div style='text-align: center;'><h4>用水行为分布</h4></div>", unsafe_allow_html=True)
         if not iv.empty:
-            stats = iv.groupby('用水行为')['区间流量'].agg(['sum', 'count']).reset_index()
-            colors = ['#3498db', '#2ecc71', '#e74c3c']
+            stats = iv.groupby('用水行为', as_index=False)['区间流量'].sum()
+            stats.rename(columns={'区间流量':'总量(L)'}, inplace=True)
+            # 固定颜色映射，避免顺序差异
+            color_map = {'冲洗用水':'#e74c3c', '桶箱用水':'#3498db', '零星用水':'#2ecc71'}
+            labels = ['冲洗用水','桶箱用水','零星用水']
+            stats = stats.set_index('用水行为').reindex(labels).fillna(0).reset_index()
+            colors = [color_map[l] for l in labels]
             figp = go.Figure(go.Pie(
-                labels=stats['用水行为'], 
-                values=stats['sum'], 
+                labels=labels,
+                values=stats['总量(L)'],
                 textinfo='percent+label',
                 marker=dict(colors=colors),
                 hole=0.4
             ))
-            figp.update_layout(
-                height=420, 
-                margin=dict(l=10, r=10, t=40, b=10),
-                legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="center", x=0.5)
-            )
-            st.plotly_chart(figp)
+            figp.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(figp, use_container_width=True)
         else:
             st.info("无有效区间")
     
@@ -761,7 +1026,7 @@ def render_history():
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("<div class='card-title'>区间用水详情</div>", unsafe_allow_html=True)
         st.dataframe(iv[['时间计算','区间流量','用水行为']].sort_values('区间流量', ascending=False), 
-                    width="stretch", height=260)
+                    use_container_width=True, height=260)
     else:
         st.info("无异常记录")
     
@@ -854,7 +1119,8 @@ def render_upload_analysis():
             return
         
         day_df = df[df['上报时间'].dt.date == sel]
-        iv = compute_intervals(day_df)
+        # 与 water_analysis_enhanced_en.py 对齐：关键点法
+        iv = compute_intervals_keypoints(day_df)
         
         # 数据统计摘要
         st.markdown("<div class='card-title'>数据统计摘要</div>", unsafe_allow_html=True)
@@ -895,63 +1161,59 @@ def render_upload_analysis():
                 st.markdown(f"<div class='metric-label'>用水区间数</div>", unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
         
-        st.markdown("<div class='card-title'>趋势图</div>", unsafe_allow_html=True)
-        fig = make_subplots(rows=1, cols=1)
-        if '累计流量' in day_df.columns:
-            fig.add_trace(go.Scatter(x=day_df['上报时间'], y=day_df['累计流量'], 
-                                  mode='lines+markers', name='累计流量(m³)', 
-                                  line=dict(color='#3498db', width=2)))
-        if not iv.empty:
-            fig.add_trace(go.Bar(x=day_df['上报时间'].iloc[:len(iv)], y=iv['区间流量'], 
-                              name='区间用水量(L)', marker_color='rgba(52, 152, 219, 0.5)'))
-        
-        fig.update_layout(
-            height=450,
-            margin=dict(l=40, r=40, t=40, b=40),
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color='#2c3e50'),
-            xaxis=dict(title='时间', gridcolor='#f0f0f0', showgrid=True),
-            yaxis=dict(title='累计流量(m³)/区间用水量(L)', gridcolor='#f0f0f0', showgrid=True)
-        )
-        st.plotly_chart(fig, width="stretch")
-
-        # 用水行为分布
-        if not iv.empty:
-            st.markdown("<div class='card-title'>用水行为分布</div>", unsafe_allow_html=True)
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                # 行为分布表格
-                behavior_stats = iv.groupby('用水行为').agg({
-                    '区间流量': ['sum', 'mean', 'count']
-                }).reset_index()
+        # 用水行为分析图（与 water_analysis_enhanced_en.py 逻辑一致）
+        st.markdown("<div class='card-title'>用水行为分析图</div>", unsafe_allow_html=True)
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            # 左侧：累计流量曲线 + 区间用水量柱状图
+            fig = make_subplots(rows=1, cols=1)
+            if '累计流量' in day_df.columns:
+                fig.add_trace(go.Scatter(x=day_df['上报时间'], y=day_df['累计流量'], 
+                                      mode='lines+markers', name='累计流量(m^3)', 
+                                      line=dict(color='#3498db', width=2)))
+            if not iv.empty:
+                # 将关键点的区间量对齐到相应时间点长度
+                x_iv = day_df['上报时间'].iloc[:len(iv)]
+                fig.add_trace(go.Bar(x=x_iv, y=iv['区间流量'], 
+                                  name='区间用水量(L)', marker_color='rgba(52, 152, 219, 0.5)'))
+            fig.update_layout(
+                height=450,
+                margin=dict(l=40, r=40, t=40, b=40),
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                font=dict(color='#2c3e50'),
+                xaxis=dict(title='时间', gridcolor='#f0f0f0', showgrid=True),
+                yaxis=dict(title='累计流量(m^3)/区间用水量(L)', gridcolor='#f0f0f0', showgrid=True)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            # 右侧：饼图
+            if not iv.empty:
+                behavior_stats = iv.groupby('用水行为').agg({'区间流量': ['sum', 'mean', 'count']}).reset_index()
                 behavior_stats.columns = ['用水行为', '总量(L)', '平均(L)', '次数']
-                if '总量(L)' in behavior_stats.columns:
-                    behavior_stats['百分比'] = (behavior_stats['总量(L)'] / behavior_stats['总量(L)'].sum() * 100).round(1).astype(str) + '%'
-                st.dataframe(behavior_stats, width="stretch")
-            with col2:
+                behavior_stats['百分比'] = (behavior_stats['总量(L)'] / max(behavior_stats['总量(L)'].sum(), 1) * 100).round(1).astype(str) + '%'
                 colors = {'冲洗用水': '#e74c3c', '桶箱用水': '#3498db', '零星用水': '#2ecc71'}
-                fig = go.Figure(data=[go.Pie(
+                figp = go.Figure(data=[go.Pie(
                     labels=behavior_stats['用水行为'],
                     values=behavior_stats['总量(L)'],
                     hole=.4,
                     marker=dict(colors=[colors.get(b, '#95a5a6') for b in behavior_stats['用水行为']]),
                     textinfo='percent+label'
                 )])
-                fig.update_layout(
-                    height=300,
-                    margin=dict(l=10, r=10, t=10, b=10)
-                )
-                st.plotly_chart(fig, width="stretch")
+                figp.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(figp, use_container_width=True)
+            else:
+                st.info("暂无可分析的区间数据")
 
-        st.markdown("<div class='card-title'>增强图（中文）</div>", unsafe_allow_html=True)
+        # 统一标题为"用水行为分析图"，增强图作为补充
+        st.markdown("<div class='card-title'>用水行为分析图</div>", unsafe_allow_html=True)
         fig_cn2 = create_enhanced_figure_cn(day_df)
         if fig_cn2:
             st.pyplot(fig_cn2, clear_figure=True)
 
         st.markdown("<div class='card-title'>原始数据预览</div>", unsafe_allow_html=True)
         with st.expander("展开查看原始数据"):
-            st.dataframe(day_df.tail(100), width="stretch", height=300)
+            st.dataframe(day_df.tail(100), use_container_width=True, height=300)
         
         # 导出分析结果
         st.markdown("<div class='card-title'>导出分析结果</div>", unsafe_allow_html=True)
@@ -1097,7 +1359,7 @@ def render_data_admin():
                         
                         confirm = st.checkbox("我已了解此操作不可撤销", key="confirm_delete")
                         if confirm:
-                            if st.button("执行删除", key="btn_del", width="stretch"):
+                            if st.button("执行删除", key="btn_del"):
                                 mask = (df2['上报时间'].dt.date < start_d) | (df2['上报时间'].dt.date > end_d)
                                 kept = df2[mask]
                                 kept.to_csv(src2, index=False)
@@ -1147,6 +1409,16 @@ def render_data_admin():
                 
             with col2:
                 st.markdown("##### 数据接收地址")
+
+                # 若后端提供 external_*（例如指向 Netlify 的公网地址），优先展示
+                if info.get("external_data_url"):
+                    st.markdown("##### 公网推送地址（推荐）")
+                    st.code(info.get("external_data_url"), language="text")
+                    if info.get("external_data_url_compat"):
+                        st.code(info.get("external_data_url_compat"), language="text")
+                    if info.get("external_health_url"):
+                        st.code(info.get("external_health_url"), language="text")
+                    st.markdown("---")
                 
                 lan_ip = info.get("lan_ip_suggest")
                 public_ip = info.get("public_ip")
@@ -1157,7 +1429,7 @@ def render_data_admin():
                         st.code(f"http://{ip}:{info.get('external_port', '8000')}/api/data", language="text")
                 
                 if public_ip:
-                    st.markdown("##### 公网接收地址")
+                    st.markdown("##### 公网接收地址（直连）")
                     st.code(f"http://{public_ip}:{info.get('external_port', '8000')}/api/data", language="text")
     
     st.markdown("</div>", unsafe_allow_html=True)
@@ -1188,7 +1460,7 @@ python api_server_local.py
         return
     
     info = api_get("/public_info")
-    # 本地存储版不再依赖数据库，若检测到 db_enabled=False，提示为“本地存储已启用”，不阻断设备管理
+    # 本地存储版不再依赖数据库，若检测到 db_enabled=False，提示为"本地存储已启用"，不阻断设备管理
     if info and info.get("storage_type") == "local_file":
         st.info("使用本地文件存储，数据库配置已禁用（无需 NEON_URL/DATABASE_URL）")
 
@@ -1212,7 +1484,7 @@ python api_server_local.py
             )
         with col3:
             st.markdown("<div style='padding-top: 32px;'></div>", unsafe_allow_html=True)
-            refresh = st.button("刷新数据", width="stretch")
+            refresh = st.button("刷新数据")
         
         # 调用API获取设备列表
         status_value = status_filter[1] if status_filter else None
@@ -1243,9 +1515,8 @@ python api_server_local.py
                     "data_count": st.column_config.NumberColumn("数据点数"),
                     "last_data": st.column_config.DatetimeColumn("最后数据时间", format="YYYY-MM-DD HH:mm")
                 },
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
-                selection="single",
                 height=400,
                 key="devices_table"
             )
@@ -1262,26 +1533,49 @@ python api_server_local.py
             </div>
             """, unsafe_allow_html=True)
             
-            # 检查是否有设备被选中
-            if st.session_state.devices_table:
-                selected_idx = st.session_state.devices_table['row_index'][0]
-                selected_device = devices_df.iloc[selected_idx]
-                st.session_state.selected_device_id = selected_device['deviceNo']
+            # 行选择替代：提供下拉选择设备
+            # 兼容列名：deviceNo/device_no/表号
+            device_id_col = None
+            for cand in ["deviceNo", "device_no", "表号"]:
+                if cand in devices_df.columns:
+                    device_id_col = cand
+                    break
+            if device_id_col is None:
+                # 无法识别设备编号列，提示并跳过
+                st.warning("设备数据缺少设备编号字段(deviceNo/device_no/表号)")
+                st.stop()
+            alias_col = "alias" if "alias" in devices_df.columns else None
+
+            options = []
+            for _, row in devices_df.iterrows():
+                dev_id = str(row.get(device_id_col, "")).strip()
+                alias_txt = str(row.get(alias_col, "")).strip() if alias_col else ""
+                options.append(f"{dev_id} / {alias_txt}")
+
+            selected_label = st.selectbox(
+                "选择设备以查看详情",
+                options=options,
+                index=0 if len(options) > 0 else None,
+            )
+            if selected_label:
+                selected_device_no = selected_label.split(" / ")[0]
+                selected_device = devices_df[devices_df[device_id_col] == selected_device_no].iloc[0]
+                st.session_state.selected_device_id = selected_device[device_id_col]
                 
                 # 显示设备详情
                 with st.expander("设备详情", expanded=True):
                     detail_col1, detail_col2 = st.columns([1, 1])
                     with detail_col1:
-                        st.markdown(f"**设备编号**: {selected_device['deviceNo']}")
-                        st.markdown(f"**IMEI号**: {selected_device['imei'] or '未设置'}")
-                        st.markdown(f"**设备别名**: {selected_device['alias'] or '未设置'}")
+                        st.markdown(f"**设备编号**: {selected_device[device_id_col]}")
+                        st.markdown(f"**IMEI号**: {selected_device.get('imei') or '未设置'}")
+                        st.markdown(f"**设备别名**: {selected_device.get('alias') or '未设置'}")
                     with detail_col2:
-                        st.markdown(f"**安装位置**: {selected_device['location'] or '未设置'}")
-                        st.markdown(f"**状态**: {'激活' if selected_device['is_active'] else '未激活'}")
-                        st.markdown(f"**注册时间**: {pd.to_datetime(selected_device['created_at']).strftime('%Y-%m-%d %H:%M:%S')}")
+                        st.markdown(f"**安装位置**: {selected_device.get('location') or '未设置'}")
+                        st.markdown(f"**状态**: {'激活' if selected_device.get('is_active') else '未激活'}")
+                        st.markdown(f"**注册时间**: {pd.to_datetime(selected_device.get('created_at')).strftime('%Y-%m-%d %H:%M:%S') if selected_device.get('created_at') else '未知'}")
                     
                     # 获取设备统计数据
-                    stats = api_get(f"/api/devices/{selected_device['deviceNo']}/stats")
+                    stats = api_get(f"/api/devices/{selected_device[device_id_col]}/stats")
                     if stats:
                         st.markdown("### 数据统计")
                         stat_col1, stat_col2, stat_col3 = st.columns(3)
@@ -1298,19 +1592,17 @@ python api_server_local.py
                         # 操作按钮
                         action_col1, action_col2 = st.columns(2)
                         with action_col1:
-                            if st.button("查看设备数据", key="view_device_data", width="stretch"):
+                            if st.button("查看设备数据", key="view_device_data"):
                                 # 可以跳转到历史查询页面并预填设备号
                                 st.session_state.nav = "历史查询"
-                                st.session_state.device_filter = selected_device['deviceNo']
+                                st.session_state.device_filter = selected_device[device_id_col]
                                 st.rerun()
                         with action_col2:
                             status_action = "停用设备" if selected_device['is_active'] else "激活设备"
-                            if st.button(status_action, key="toggle_status", width="stretch"): 
+                            if st.button(status_action, key="toggle_status"): 
                                 # 更新设备状态
-                                ok = api_post(f"/api/devices/{selected_device['deviceNo']}", {
-                                    "deviceNo": selected_device['deviceNo'],
-                                    "is_active": not selected_device['is_active']
-                                })
+                                payload = {"deviceNo": selected_device[device_id_col], "is_active": not selected_device.get('is_active')}
+                                ok = api_post(f"/api/devices/{selected_device[device_id_col]}", payload)
                                 if ok:
                                     st.success(f"设备已{'停用' if selected_device['is_active'] else '激活'}")
                                     # 刷新页面
@@ -1331,9 +1623,9 @@ python api_server_local.py
             
             col1, col2 = st.columns(2)
             with col1:
-                submitted = st.form_submit_button("保存设备", width="stretch")
+                submitted = st.form_submit_button("保存设备")
             with col2:
-                reset = st.form_submit_button("重置表单", width="stretch", type="secondary")
+                reset = st.form_submit_button("重置表单", type="secondary")
             
             if submitted:
                 if not device_no:
@@ -1404,7 +1696,7 @@ python api_server_local.py
                 
                 # 预览数据
                 st.markdown("### 数据预览")
-                st.dataframe(df.head(10), width="stretch")
+                st.dataframe(df.head(10), use_container_width=True)
                 
                 # 确认导入
                 if st.button("确认导入", key="confirm_bulk_import"):
@@ -1415,7 +1707,11 @@ python api_server_local.py
                     # 准备请求数据
                     devices = []
                     for _, row in df.iterrows():
-                        device = {"deviceNo": str(row['deviceNo'])}
+                        # 兼容 deviceNo/device_no/表号
+                        dev_id = row.get('deviceNo') if 'deviceNo' in df.columns else (row.get('device_no') if 'device_no' in df.columns else None)
+                        if dev_id is None:
+                            continue
+                        device = {"deviceNo": str(dev_id)}
                         if 'imei' in df.columns and not pd.isna(row['imei']):
                             device["imei"] = str(row['imei'])
                         if 'alias' in df.columns and not pd.isna(row['alias']):

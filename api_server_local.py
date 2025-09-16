@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 import pandas as pd
 import os
 import uvicorn
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import Optional, Union, List
 from fastapi.responses import HTMLResponse
@@ -27,6 +27,7 @@ import time
 import hmac
 import base64
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 # 导入本地存储模块
 import local_storage
@@ -53,11 +54,49 @@ PUSH_FILE = "device_push_data.csv"            # 新的推送数据表
 SAVE_LOCK = Lock()
 
 # FastAPI应用程序
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        local_storage.init_storage()
+    except Exception as e:
+        logger.error(f"初始化本地存储失败: {e}")
+    try:
+        ensure_data_files()
+    except Exception as e:
+        logger.error(f"初始化数据文件失败: {e}")
+    yield
+
 app = FastAPI(
     title="水表数据接收API",
     description="接收水表设备推送的实时数据并进行存储",
-    version="1.1.0"
+    version="1.1.0",
+    lifespan=lifespan
 )
+
+# 初始化与文件保障（用于容器/云平台）
+def ensure_data_files():
+    for f in [DATA_FILE, PUSH_FILE]:
+        if not os.path.exists(f):
+            pd.DataFrame({
+                "表号": [],
+                "电池电压": [],
+                "冻结流量": [],
+                "imei号": [],
+                "瞬时流量": [],
+                "压力": [],
+                "反向流量": [],
+                "信号值": [],
+                "启动次数": [],
+                "温度": [],
+                "累计流量": [],
+                "阀门状态": [],
+                "上报时间": [],
+                "日期计算": [],
+                "时间计算": [],
+                "数据L/s": []
+            }).to_csv(f, index=False, encoding='utf-8')
+
+# 已迁移至 lifespan 上下文，无需 startup 事件
 
 # 添加CORS中间件
 _CORS = getenv("CORS_ORIGINS", "*")
@@ -123,14 +162,23 @@ def parse_update_time(update_time: Union[int, str]) -> datetime:
         # 作为毫秒时间戳
         return datetime.fromtimestamp(update_time / 1000)
     if isinstance(update_time, str):
+        s = update_time.strip()
+        # 数字字符串：支持秒或毫秒时间戳
+        if s.isdigit():
+            ts = int(s)
+            # 粗略判断：>= 1e12 认为是毫秒
+            if ts >= 10**12:
+                return datetime.fromtimestamp(ts / 1000)
+            else:
+                return datetime.fromtimestamp(ts)
         # 支持 'YYYY-MM-DD HH:MM:SS'
         try:
-            return datetime.strptime(update_time, "%Y-%m-%d %H:%M:%S")
+            return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
         except Exception:
             # 回退：尝试ISO等格式
             try:
-                return datetime.fromisoformat(update_time)
-            except Exception as e:
+                return datetime.fromisoformat(s)
+            except Exception:
                 raise ValueError(f"无法解析updateTime: {update_time}")
     raise ValueError("updateTime 类型无效")
 
@@ -193,6 +241,32 @@ def get_public_ip() -> Optional[str]:
     return None
 
 
+def detect_external_base(request: Optional[Request]) -> Optional[str]:
+    """根据环境变量或反向代理头推导可分享的外部基地址。"""
+    # 优先使用显式配置
+    external_base = os.getenv("EXTERNAL_API_BASE")
+    if external_base:
+        return external_base.rstrip("/")
+    # 其次使用反向代理头（Render/Streamlit Cloud 等）
+    try:
+        if request is not None:
+            proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+            host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+            prefix = request.headers.get("x-forwarded-prefix") or ""
+            if prefix and not prefix.startswith("/"):
+                prefix = "/" + prefix
+            if proto and host:
+                return f"{proto}://{host}{prefix}".rstrip("/")
+    except Exception:
+        pass
+    # 最后回退到公网IP探测（不保证可达）
+    public_ip = get_public_ip()
+    if public_ip:
+        port = os.getenv("EXTERNAL_PORT") or os.getenv("PORT") or os.getenv("API_PORT", "8000")
+        return f"http://{public_ip}:{port}"
+    return None
+
+
 def is_private_ipv4(ip: str) -> bool:
     try:
         return ipaddress.IPv4Address(ip).is_private
@@ -245,7 +319,9 @@ async def receive_data(data: WaterMeterData, background_tasks: BackgroundTasks, 
     try:
         # 限流
         try:
-            client_ip = request.client.host if request and request.client else "unknown"
+            # 透传反向代理真实IP，避免代理层导致同一IP限流
+            xff = request.headers.get("x-forwarded-for") if request else None
+            client_ip = (xff.split(",")[0].strip() if xff else (request.client.host if request and request.client else "unknown"))
             _rate_limit_check(client_ip)
         except Exception as _e:
             raise
@@ -263,6 +339,40 @@ async def receive_data(data: WaterMeterData, background_tasks: BackgroundTasks, 
     except Exception as e:
         logger.error(f"处理数据时发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"处理数据时发生错误: {str(e)}")
+
+
+@app.post("/api/data_compat", response_model=dict)
+async def receive_data_compat(request: Request, background_tasks: BackgroundTasks):
+    """
+    兼容端点：同时支持 application/json 与 form-urlencoded 设备推送
+    """
+    try:
+        # 限流
+        # 透传反向代理真实IP
+        xff = request.headers.get("x-forwarded-for") if request else None
+        client_ip = (xff.split(",")[0].strip() if xff else (request.client.host if request and request.client else "unknown"))
+        _rate_limit_check(client_ip)
+        # 解析载荷
+        content_type = request.headers.get("content-type", "").lower()
+        payload: dict
+        if "application/json" in content_type:
+            payload = await request.json()
+        else:
+            form = await request.form()
+            payload = dict(form)
+        # 统一转为字符串
+        payload = {k: (v if isinstance(v, str) else str(v)) for k, v in payload.items()}
+        # 验证并保存
+        wm = WaterMeterData(**payload)
+        dt = parse_update_time(wm.updateTime)
+        logger.info(f"兼容接收: deviceNo={wm.deviceNo}, updateTime={dt}")
+        background_tasks.add_task(save_data, wm.model_dump())
+        return {"msg": "SUCCESS", "code": 200}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"兼容接收出错: {e}")
+        raise HTTPException(status_code=400, detail=f"参数错误: {e}")
 
 
 # 保存数据到CSV
@@ -410,15 +520,72 @@ async def pushed_html(limit: Optional[int] = 50):
     """
     return HTMLResponse(html)
 
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    external_base = detect_external_base(request)
+    info = get_network_info()
+    if external_base:
+        data_url = f"{external_base}/api/data"
+        data_url_compat = f"{external_base}/api/data_compat"
+        health_url = f"{external_base}/health"
+    else:
+        # 回退到 LAN/Public 信息
+        suggest = info.get("external_data_url") or ""
+        data_url = suggest or "http://127.0.0.1:8000/api/data"
+        data_url_compat = data_url.replace("/api/data", "/api/data_compat")
+        health_url = info.get("external_health_url") or data_url.replace("/api/data_compat", "/health").replace("/api/data", "/health")
+    html = f"""
+    <html>
+      <head>
+        <meta charset='utf-8' />
+        <title>水表数据接收API</title>
+        <style>
+          body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'Microsoft YaHei', sans-serif; margin: 28px; }}
+          .card {{ border: 1px solid #e5e7eb; border-radius: 10px; padding: 18px; max-width: 880px; }}
+          .title {{ font-size: 22px; font-weight: 600; margin-bottom: 10px; }}
+          .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }}
+          a {{ color: #2563eb; text-decoration: none; }}
+          a:hover {{ text-decoration: underline; }}
+          .tip {{ color: #6b7280; font-size: 13px; margin-top: 12px; }}
+          ul {{ line-height: 1.7; }}
+        </style>
+      </head>
+      <body>
+        <div class='card'>
+          <div class='title'>水表数据接收API</div>
+          <div>设备推送地址（JSON）：<div class='mono'><a href='{data_url}' target='_blank'>{data_url}</a></div></div>
+          <div>设备推送地址（表单兼容）：<div class='mono'><a href='{data_url_compat}' target='_blank'>{data_url_compat}</a></div></div>
+          <div>健康检查：<div class='mono'><a href='{health_url}' target='_blank'>{health_url}</a></div></div>
+          <div class='tip'>
+            推送示例（JSON）：
+            <pre class='mono'>curl -X POST -H "Content-Type: application/json" \
+  -d '{{"batteryVoltage":"3.9","deviceNo":"70666000038000","freezeDateFlow":"0","imei":"867726066000000","instantaneousFlow":"0.0","pressure":"0","reverseFlow":"0","signalValue":"-88","startFrequency":"0","temprature":"25","totalFlow":"12.34","valveStatu":"OPEN","updateTime":"2025-09-13 12:34:56"}}' \
+  "{data_url}"
+            </pre>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+    return HTMLResponse(html)
+
 
 # 网络信息接口
 @app.get("/public_info")
-async def public_info():
+async def public_info(request: Request):
     info = get_network_info()
-    
+
+    # 外部可分享的推送地址优先（Render/反代环境）
+    external_base = detect_external_base(request)
+    if external_base:
+        info["external_base"] = external_base
+        info["external_data_url"] = f"{external_base}/api/data"
+        info["external_data_url_compat"] = f"{external_base}/api/data_compat"
+        info["external_health_url"] = f"{external_base}/health"
+
     # 数据清理状态
     needs_cleanup, message, count = local_storage.check_data_cleanup()
-    
+
     info.update({
         "db_enabled": False,  # 不再使用数据库
         "storage_type": "local_file",
@@ -644,7 +811,7 @@ async def get_device_daily_data(device_no: str, date: str):
         
         # 设置当天开始和结束时间
         start_date = date
-        end_date = (dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        end_date = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
         
         # 查询数据
         df = local_storage.query_water_data(device_no, start_date, end_date, 10000)
@@ -724,7 +891,8 @@ if __name__ == "__main__":
             }).to_csv(f, index=False, encoding='utf-8')
     
     # 启动API服务器
-    port = int(os.getenv("API_PORT", "8000"))
+    # Render/Heroku等平台会注入 PORT 环境变量
+    port = int(os.getenv("PORT") or os.getenv("API_PORT", "8000"))
     host = os.getenv("API_HOST", "0.0.0.0")
     logger.info(f"启动API服务器: {host}:{port}")
     uvicorn.run(app, host=host, port=port) 

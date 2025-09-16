@@ -8,9 +8,41 @@ from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 import matplotlib.gridspec as gridspec
 import matplotlib.ticker as ticker
+import os
+from matplotlib import font_manager
 
-# 中文字体
-matplotlib.rcParams['font.sans-serif'] = ['SimHei','Microsoft YaHei','SimSun']
+# 中文字体：动态优先使用 Noto Sans（云端更稳定）
+try:
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    preferred = ['Noto Sans CJK SC','Noto Sans SC','SimHei','Microsoft YaHei','Arial Unicode MS','DejaVu Sans']
+    fam = None
+    for f in preferred:
+        if f in available:
+            fam = f
+            break
+    if fam is None:
+        font_dir = os.path.join(os.path.dirname(__file__), 'fonts')
+        os.makedirs(font_dir, exist_ok=True)
+        font_path = os.path.join(font_dir, 'NotoSansSC-Regular.otf')
+        if not os.path.exists(font_path):
+            import urllib.request
+            for u in [
+                'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
+                'https://fonts.gstatic.com/ea/notosanssc/v1/NotoSansSC-Regular.otf'
+            ]:
+                try:
+                    urllib.request.urlretrieve(u, font_path)
+                    break
+                except Exception:
+                    continue
+        if os.path.exists(font_path):
+            font_manager.fontManager.addfont(font_path)
+            fam = 'Noto Sans SC'
+    if fam:
+        matplotlib.rcParams['font.sans-serif'] = [fam,'SimHei','Microsoft YaHei','Arial Unicode MS','DejaVu Sans']
+except Exception:
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei','Microsoft YaHei','SimSun','DejaVu Sans']
+
 matplotlib.rcParams['axes.unicode_minus'] = False
 
 
@@ -112,26 +144,17 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
     
     # 使用更粗的线条和更鲜明的颜色
     ax1.plot(time, acc_flow, color='#3498DB', linewidth=2.0, label='累计流量')
-    ax1.set_ylabel('累计流量 (m³)', fontsize=13, color='#3498DB', fontweight='bold')
+    ax1.set_ylabel('累计流量 (m^3)', fontsize=13, color='#3498DB', fontweight='bold')
     ax1.grid(True, linestyle='--', alpha=0.7, color='#E0E0E0')
-    
-    # 添加标题和更清晰的日期显示
-    title_date = date_str if date_str else df['上报时间'].dt.date.iloc[0].strftime('%Y-%m-%d') if not df.empty else "未知日期"
-    ax1.set_title(f"日期: {title_date}", fontsize=14, pad=10, loc='left', fontweight='bold')
 
     if len(inter_flow) > 0:
-        # 为每个用水事件添加更丰富的视觉信息
         behavior_count = {'冲洗用水': 0, '桶箱用水': 0, '零星用水': 0}
         for t, f, act, col, vol in zip(time2, acc_flow2, activity, color2, inter_flow):
             if pd.notna(vol) and abs(vol) > 0:
-                # 用更清晰的气泡标记区间流量
                 ax1.scatter(t, f, c=col, s=100*abs(vol), marker='o', alpha=.8, 
                           edgecolor='black', linewidth=0.8, zorder=10)
                 behavior_count[act] += 1
-                
-                # 为重要数据点添加标注
                 if abs(vol) > 10:
-                    # 添加时间和流量信息
                     time_str = t.strftime('%H:%M')
                     ax1.annotate(
                         f"{abs(vol):.1f}L ({time_str})",
@@ -149,7 +172,7 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
     
     # 添加更清晰的时间轴格式
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=1))  # 每小时显示一次
+    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=2))
     plt.setp(ax1.get_xticklabels(), rotation=45, ha='right', fontsize=10)
 
     # 瞬时流量轴优化
@@ -160,7 +183,7 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
     
     # 改进图例设计
     legends = [
-        Line2D([0],[0], color='#3498DB', lw=2, label='累计流量 (m³)'),
+        Line2D([0],[0], color='#3498DB', lw=2, label='累计流量 (m^3)'),
         Line2D([0],[0], color='#E74C3C', lw=2, linestyle='-', label='瞬时流量 (L/s)'),
         Patch(facecolor='#FF9999', edgecolor='black', label='冲洗用水'),
         Patch(facecolor='#66B2FF', edgecolor='black', label='桶箱用水'),
@@ -180,17 +203,10 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
     ax2.set_ylabel('温度 (°C)', fontsize=13, color='#E67E22', fontweight='bold')
     ax2.grid(True, linestyle='--', alpha=0.7, color='#E0E0E0')
     ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    ax2.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax2.xaxis.set_major_locator(mdates.HourLocator(interval=2))
     plt.setp(ax2.get_xticklabels(), rotation=45, ha='right', fontsize=10)
     
-    # 添加温度平均值线
-    if len(temperature) > 0:
-        mean_temp = np.nanmean(temperature)
-        ax2.axhline(y=mean_temp, color='#E67E22', linestyle='--', alpha=0.7)
-        ax2.text(time[0], mean_temp, f"平均: {mean_temp:.1f}°C", 
-              fontsize=10, va='bottom', ha='left', color='#E67E22')
-
-    # 子图3：电池/信号强度优化
+    # 子图3：电池/信号强度
     ax3 = fig.add_subplot(gs[2, 0])
     ax3.set_facecolor('#F8F9FA')
     ax3.plot(time, battery, color='#2ECC71', linewidth=2.0, label='电池电压')
@@ -198,64 +214,35 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
     ax3.set_ylabel('电池电压 (V)', fontsize=13, color='#2ECC71', fontweight='bold')
     ax3.grid(True, linestyle='--', alpha=0.7, color='#E0E0E0')
     ax3.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-    ax3.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax3.xaxis.set_major_locator(mdates.HourLocator(interval=2))
     plt.setp(ax3.get_xticklabels(), rotation=45, ha='right', fontsize=10)
 
-    # 信号强度优化
+    # 信号强度
     ax32 = ax3.twinx()
     ax32.plot(time, signal, color='#9B59B6', linestyle='-', linewidth=2.0, alpha=0.8, label='信号强度')
     ax32.scatter(time, signal, c='#9B59B6', s=25, marker='^', alpha=0.8)
     ax32.set_ylabel('信号强度 (dBm)', fontsize=13, color='#9B59B6', fontweight='bold')
     
-    # 添加电池阈值线
-    if len(battery) > 0 and np.nanmax(battery) > 0:
-        ax3.axhline(y=3.2, color='#E74C3C', linestyle='-.', alpha=0.7, linewidth=1)
-        ax3.text(time[0], 3.2, "电量警戒线", fontsize=9, va='bottom', ha='left', 
-               color='#E74C3C', bbox=dict(facecolor='white', alpha=0.7))
-
-    # 设置整体标题和摘要信息
-    title = f"用水行为分析" if date_str is None else f"用水行为分析 - {date_str}"
+    # 设置整体标题
+    title = f"用水行为分析图" if date_str is None else f"用水行为分析图 - {date_str}"
     fig.suptitle(title, fontsize=16, y=0.98, fontweight='bold')
-    
-    # 统计数据摘要优化
+
+    # 统计摘要
     if len(wm_data2) > 0:
         total_usage = abs(pd.to_numeric(wm_data2['区间流量'], errors='coerce').sum())
         wash_usage = abs(wm_data2.loc[wm_data2['用水行为']=='冲洗用水','区间流量'].sum())
         bucket_usage = abs(wm_data2.loc[wm_data2['用水行为']=='桶箱用水','区间流量'].sum())
         small_usage = abs(wm_data2.loc[wm_data2['用水行为']=='零星用水','区间流量'].sum())
-        
-        # 计算用水次数
-        wash_count = len(wm_data2[wm_data2['用水行为']=='冲洗用水'])
-        bucket_count = len(wm_data2[wm_data2['用水行为']=='桶箱用水'])
-        small_count = len(wm_data2[wm_data2['用水行为']=='零星用水'])
-        
-        if total_usage > 0:
-            # 创建更美观、更信息丰富的统计文本框
-            stats_text = (
-                f"总用水量: {total_usage:.1f}L (总计 {len(wm_data2)} 次)\n"
-                f"冲洗用水: {wash_usage:.1f}L ({wash_usage/total_usage*100:.1f}%) - {wash_count}次\n"
-                f"桶箱用水: {bucket_usage:.1f}L ({bucket_usage/total_usage*100:.1f}%) - {bucket_count}次\n"
-                f"零星用水: {small_usage:.1f}L ({small_usage/total_usage*100:.1f}%) - {small_count}次"
-            )
-            
-            # 高亮显示统计框
-            stats_box = fig.text(
-                0.02, 0.02, stats_text, fontsize=11, 
-                bbox=dict(
-                    facecolor='white', 
-                    alpha=0.9, 
-                    boxstyle='round,pad=0.6',
-                    edgecolor='#3498DB',
-                    linewidth=1.5
-                )
-            )
-
-    # 添加更多用户友好元素
-    fig.text(
-        0.98, 0.02, 
-        f"生成时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}", 
-        fontsize=8, color='gray', ha='right'
-    )
+        if total_usage == 0:
+            total_usage = 1
+        stats_text = (
+            f"总用水量: {total_usage:.1f}L\n"
+            f"冲洗用水: {wash_usage:.1f}L ({wash_usage/total_usage*100:.1f}%)\n"
+            f"桶箱用水: {bucket_usage:.1f}L ({bucket_usage/total_usage*100:.1f}%)\n"
+            f"零星用水: {small_usage:.1f}L ({small_usage/total_usage*100:.1f}%)"
+        )
+        fig.text(0.02, 0.02, stats_text, fontsize=11, 
+                 bbox=dict(facecolor='white', alpha=0.9, boxstyle='round,pad=0.6', edgecolor='#3498DB', linewidth=1.2))
 
     fig.tight_layout()
     fig.subplots_adjust(top=0.92)
