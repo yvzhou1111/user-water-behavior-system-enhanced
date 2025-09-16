@@ -779,6 +779,10 @@ def create_enhanced_figure_cn(day_df: pd.DataFrame):
         fig.set_constrained_layout(True)
     except Exception:
         pass
+    try:
+        plt.tight_layout()
+    except Exception:
+        pass
     return fig
 
 # -------- 实时监测 --------
@@ -1035,8 +1039,8 @@ def render_history():
         # 区间流量数据表格
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("<div class='card-title'>区间用水详情</div>", unsafe_allow_html=True)
-        st.dataframe(iv[['时间计算','区间流量','用水行为']].sort_values('区间流量', ascending=False), 
-                    width='stretch', height=260)
+                st.dataframe(iv[['时间计算','区间流量','用水行为']].sort_values('区间流量', ascending=False), 
+                   width='stretch', height=260)
     else:
         st.info("无异常记录")
     
