@@ -450,6 +450,35 @@ def api_post(path: str, json_body: dict, timeout: int = 2):
             st.warning(f"API请求超时: POST {path}")
         return None
 
+# DELETE 封装
+
+def api_delete(path: str, timeout: int = 4):
+    if INPROC_CLIENT is not None:
+        try:
+            r = INPROC_CLIENT.delete(path, timeout=timeout)
+            if r.status_code >= 400:
+                st.warning(f"API请求失败: DELETE {path} - {r.text}")
+                return None
+            return r.json() if r.content else {"ok": True}
+        except Exception:
+            return None
+    if not API_AVAILABLE:
+        return None
+    try:
+        r = requests.delete(API_BASE + path, timeout=timeout)
+        if r.status_code >= 400:
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text
+            st.warning(f"API请求失败: DELETE {path} - {detail}")
+            return None
+        return r.json() if r.content else {"ok": True}
+    except Exception as e:
+        if "timeout" in str(e).lower():
+            st.warning(f"API请求超时: DELETE {path}")
+        return None
+
 def load_csv_safely(path: str) -> pd.DataFrame:
     if not os.path.exists(path):
         return pd.DataFrame()
@@ -787,36 +816,86 @@ def create_enhanced_figure_cn(day_df: pd.DataFrame):
 
 # -------- 实时监测 --------
 
-def render_realtime():
-    st.markdown("<h2>实时监测</h2>", unsafe_allow_html=True)
-    st.markdown("<div class='section-container'>", unsafe_allow_html=True)
-    # 数据源优先级：真实推送(device_push_data.csv) > 历史采集(water_meter_data.csv)
-    sources = []
-    has_real = os.path.exists("device_push_data.csv")
-    has_hist = os.path.exists("water_meter_data.csv")
-    if has_real:
-        sources.append("device_push_data.csv")
-    if has_hist:
-        sources.append("water_meter_data.csv")
-    if not sources:
-        sources = ["water_meter_data.csv"]
-    # 默认选择真实数据（若存在）
-    default_index = 0
-    ds = st.selectbox("选择数据源", sources, index=default_index, key="realtime_source", help="优先选择真实推送数据，可手动切换")
+# ---------------- 云端历史获取工具（提前定义） ----------------
 
-    df = load_csv_safely(ds)
-    if df.empty:
-        st.info("暂无数据")
-        # 如果选的是历史数据但存在真实推送数据，自动切换
-        if ds != "device_push_data.csv" and os.path.exists("device_push_data.csv"):
-            st.session_state.realtime_source = "device_push_data.csv"
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+def _get_external_api_base() -> str:
+    base = os.getenv("EXTERNAL_API_BASE")
+    if base:
+        return base.rstrip("/")
+    return "https://water-behavior-push-712802.netlify.app"
+
+
+def fetch_cloud_history(device_no: str | None = None,
+                        since: date | None = None,
+                        until: date | None = None,
+                        limit: int = 5000) -> pd.DataFrame:
+    """从 Netlify Functions 的 /api/history 获取历史数据，返回规范列。
+    列包含：表号、imei号、累计流量、瞬时流量、温度、电池电压、信号值、上报时间、日期计算、时间计算。
+    """
+    base = _get_external_api_base()
+    params = {"limit": str(limit)}
+    if device_no:
+        params["deviceNo"] = str(device_no)
+    if since:
+        params["since"] = f"{since.strftime('%Y-%m-%d')} 00:00:00"
+    if until:
+        params["until"] = f"{until.strftime('%Y-%m-%d')} 23:59:59"
+    try:
+        r = requests.get(f"{base}/api/history", params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        items = data.get("items", data if isinstance(data, list) else [])
+        df = pd.DataFrame(items)
+    except Exception:
+        return pd.DataFrame(columns=['表号','imei号','累计流量','瞬时流量','温度','电池电压','信号值','上报时间'])
 
     if '上报时间' in df.columns:
         df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
-        df = df.dropna(subset=['上报时间']).sort_values('上报时间', ascending=True)
+    for c in ['累计流量','瞬时流量','温度','电池电压','信号值']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+    if '上报时间' in df.columns:
+        try:
+            df['日期计算'] = df['上报时间'].dt.date.astype('datetime64[ns]')
+            df['时间计算'] = df['上报时间'].dt.time
+        except Exception:
+            pass
+    return df
+
+def render_realtime():
+    st.markdown("<h2>实时监测</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-container'>", unsafe_allow_html=True)
+    
+    # 优先云端：获取最近数据用于设备列表
+    df_all = fetch_cloud_history(limit=3000)
+
+    if not df_all.empty and '表号' in df_all.columns:
+        # 设备选择
+        device_options = sorted(df_all['表号'].dropna().astype(str).unique())
+        device_sel = st.selectbox("选择设备", device_options, index=0, key="rt_device")
+        # 针对所选设备再次获取更完整数据
+        df = fetch_cloud_history(device_no=device_sel, limit=5000)
+        # 统一时间列为 datetime 并排序
+        if '上报时间' in df.columns:
+            df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
+            df = df.dropna(subset=['上报时间']).sort_values('上报时间')
+        # 日期选择
+        dates = sorted(df['上报时间'].dropna().dt.date.unique(), reverse=True)
+    else:
+        # 回退本地 CSV
+        if os.path.exists("device_push_data.csv"):
+            df = load_csv_safely("device_push_data.csv")
+        elif os.path.exists("water_meter_data.csv"):
+            df = load_csv_safely("water_meter_data.csv")
+        else:
+            st.info("暂无数据")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+        if '上报时间' in df.columns:
+            df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
+            df = df.dropna(subset=['上报时间']).sort_values('上报时间', ascending=True)
+
+    # 数值列规范
     for col in ['累计流量', '瞬时流量', '电池电压', '温度', '信号值']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -830,43 +909,27 @@ def render_realtime():
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
         st.markdown(f"<div class='metric-value'>{val:.3f}</div>" if pd.notna(val) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='metric-label'>累计流量(m^3)</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
     with col2:
         today = date.today()
-        # 优先使用 '日期计算' 过滤，避免时区/解析误差；回退到上报时间日期
-        if '日期计算' in df.columns:
-            today_str = today.strftime('%Y-%m-%d')
-            dtd = df[df['日期计算'] == today_str].copy()
-        else:
-            dtd = df[df['上报时间'].dt.date == today].copy()
-        # 保证排序与数值类型
-        if '上报时间' in dtd.columns:
-            dtd = dtd.sort_values('上报时间')
-        if '累计流量' in dtd.columns:
-            dtd['累计流量'] = pd.to_numeric(dtd['累计流量'], errors='coerce')
-        # 计算用水量：优先使用当日最大-最小累计流量；若仍为0则用正向增量和
-        if len(dtd) >= 1 and '累计流量' in dtd.columns:
-            max_min_usage = (dtd['累计流量'].max() - dtd['累计流量'].min()) * 1000.0
-            inc_sum_usage = dtd['累计流量'].diff().clip(lower=0).sum() * 1000.0
-            usage = float(max(max_min_usage, inc_sum_usage)) if pd.notna(max_min_usage) else float(inc_sum_usage or 0.0)
-        else:
-            usage = 0.0
+        sel_date = df['上报时间'].dt.date.iloc[-1] if '上报时间' in df.columns and not df.empty else today
+        v = df[df['上报时间'].dt.date == sel_date]
+        day_usage = None
+        if '累计流量' in v.columns and len(v) >= 2:
+            x = pd.to_numeric(v['累计流量'], errors='coerce')
+            day_usage = (x.iloc[-1] - x.iloc[0]) * 1000
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{usage:.1f}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-value'>{day_usage:.1f}</div>" if day_usage is not None else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='metric-label'>今日用水量(L)</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
     with col3:
-        avg_q = df['瞬时流量'].mean() if '瞬时流量' in df.columns else None
+        v = latest.get('温度')
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{avg_q:.4f}</div>" if pd.notna(avg_q) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>平均瞬时流量(m^3/h)</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-value'>{v:.1f}</div>" if pd.notna(v) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>温度(°C)</div>", unsafe_allow_html=True)
     with col4:
-        max_q = df['瞬时流量'].max() if '瞬时流量' in df.columns else None
+        v = latest.get('电池电压')
         st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-value'>{max_q:.4f}</div>" if pd.notna(max_q) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
-        st.markdown(f"<div class='metric-label'>最大瞬时流量(m^3/h)</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-value'>{v:.2f}</div>" if pd.notna(v) else "<div class='metric-value'>-</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>电池电压(V)</div>", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("<div class='card-title'>流量趋势</div>", unsafe_allow_html=True)
@@ -895,20 +958,19 @@ def render_realtime():
     )
     st.plotly_chart(fig, width='stretch')
 
-    # 中文增强图（与历史页一致风格）
+    # 中文增强图
     st.markdown("<div class='card-title'>增强图（中文）</div>", unsafe_allow_html=True)
     try:
-        # 当天数据用于增强图
-        day_df = df[df['上报时间'].dt.date == date.today()].copy()
+        day_df = df.copy()
         if not day_df.empty:
-            fig_cn = enhanced_cn.create_enhanced_figure_cn(day_df, date_str=date.today().strftime('%Y-%m-%d'))
+            fig_cn = enhanced_cn.create_enhanced_figure_cn(day_df, date_str=day_df['上报时间'].dt.date.iloc[0].strftime('%Y-%m-%d'))
             st.pyplot(fig_cn, clear_figure=True)
         else:
             st.info("今日暂无数据用于绘制增强图")
     except Exception as e:
         st.warning(f"增强图绘制失败: {e}")
-    
-    # 添加可选自动刷新功能（默认关闭）
+
+    # 自动刷新
     st.markdown("<div class='card-title'>数据自动刷新</div>", unsafe_allow_html=True)
     enable_auto = st.checkbox("启用自动刷新", key="auto_refresh_enabled", value=False)
     refresh_interval = st.slider("刷新间隔(秒)", min_value=5, max_value=120, value=30, step=5, disabled=not enable_auto)
@@ -919,7 +981,7 @@ def render_realtime():
             st.info(f"将在 {refresh_interval} 秒后刷新……")
         time.sleep(refresh_interval)
         st.rerun()
-    
+
     # 最新数据点
     st.markdown("<div class='card-title'>最新数据</div>", unsafe_allow_html=True)
     last_points = df.tail(5).sort_values('上报时间', ascending=False)
@@ -932,118 +994,113 @@ def render_realtime():
 def render_history():
     st.markdown("<h2>历史查询</h2>", unsafe_allow_html=True)
     st.markdown("<div class='section-container'>", unsafe_allow_html=True)
-    
-    df = load_csv_safely("water_meter_data.csv")
-    if df.empty or '上报时间' not in df.columns:
-        st.info("暂无数据")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-    df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
-    df = df.dropna(subset=['上报时间']).sort_values('上报时间')
-    for col in ['累计流量', '温度', '电池电压', '信号值']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    dates = sorted(df['上报时间'].dt.date.unique(), reverse=True)
-    
-    st.markdown("<div class='card-title'>选择日期</div>", unsafe_allow_html=True)
-    sel = st.selectbox("选择要查看的日期", dates, index=0 if dates else None, format_func=lambda x: x.strftime('%Y-%m-%d'))
-    if not sel:
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-        
-    day_df = df[df['上报时间'].dt.date == sel]
-    # 使用关键点算法，确保与增强图一致
-    iv = compute_intervals_keypoints(day_df)
+    df_all = fetch_cloud_history(limit=5000)
+    use_cloud = not df_all.empty and '表号' in df_all.columns
 
-    st.markdown("<div class='card-title'>用水趋势分析</div>", unsafe_allow_html=True)
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        # 趋势 + 区间柱状
-        fig = make_subplots(rows=1, cols=1)
-        fig.add_trace(go.Scatter(x=day_df['上报时间'], y=day_df['累计流量'], mode='lines+markers', 
-                                name='累计流量(m^3)', line=dict(color='#3498db', width=2)))
-        if not iv.empty:
-            fig.add_trace(go.Bar(x=day_df['上报时间'].iloc[:len(iv)], y=iv['区间流量'], 
-                                name='区间用水量(L)', marker_color='rgba(52, 152, 219, 0.5)'))
-        fig.update_layout(
-            height=420, 
-            margin=dict(l=40, r=40, t=40, b=40),
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            font=dict(color='#2c3e50'),
-            xaxis=dict(gridcolor='#f0f0f0', showgrid=True),
-            yaxis=dict(gridcolor='#f0f0f0', showgrid=True)
-        )
-        st.plotly_chart(fig, width='stretch')
-    with col2:
-        st.markdown("<div style='text-align: center;'><h4>用水行为分布</h4></div>", unsafe_allow_html=True)
-        if not iv.empty:
-            stats = iv.groupby('用水行为', as_index=False)['区间流量'].sum()
-            stats.rename(columns={'区间流量':'总量(L)'}, inplace=True)
-            # 固定颜色映射，避免顺序差异
-            color_map = {'冲洗用水':'#e74c3c', '桶箱用水':'#3498db', '零星用水':'#2ecc71'}
-            labels = ['冲洗用水','桶箱用水','零星用水']
-            stats = stats.set_index('用水行为').reindex(labels).fillna(0).reset_index()
-            colors = [color_map[l] for l in labels]
-            figp = go.Figure(go.Pie(
-                labels=labels,
-                values=stats['总量(L)'],
-                textinfo='percent+label',
-                marker=dict(colors=colors),
-                hole=0.4
-            ))
-            figp.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10))
-            st.plotly_chart(figp, width='stretch')
-        else:
-            st.info("无有效区间")
-    
-    st.markdown("<div class='card-title'>增强图（中文）</div>", unsafe_allow_html=True)
-    fig_cn = create_enhanced_figure_cn(day_df)
-    if fig_cn:
-        st.pyplot(fig_cn, clear_figure=True)
-
-    st.markdown("<div class='card-title'>异常检测</div>", unsafe_allow_html=True)
-    if not iv.empty:
-        # 大流量
-        large_flow = iv[iv['区间流量'] > 50]
-        # 夜间用水
-        day_df = day_df.copy()
-        day_df['hour'] = day_df['上报时间'].dt.hour
-        night_usage = iv.merge(day_df[['上报时间','hour']], left_index=True, right_index=True, how='left')
-        night_usage = night_usage[(night_usage['hour'] >= 23) | (night_usage['hour'] <= 5)]
-        night_usage = night_usage[night_usage['区间流量'] > 5]
-        # 疑似漏水：持续小流量
-        small_cont = iv[(iv['区间流量'] > 0) & (iv['区间流量'] < 1)]
-        leak = len(small_cont) > 5
-        
-        # 展示异常指标
-        colx, coly, colz = st.columns(3)
-        with colx:
-            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-value'>{len(large_flow)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-label'>异常大流量次数</div>", unsafe_allow_html=True)
+    if use_cloud:
+        # 设备与时间范围
+        device_options = sorted(df_all['表号'].dropna().astype(str).unique())
+        device_sel = st.selectbox("选择设备", device_options, index=0, key="hist_device")
+        df_dev = fetch_cloud_history(device_no=device_sel, limit=5000)
+        df_dev = df_dev.dropna(subset=['上报时间']).sort_values('上报时间')
+        min_d = df_dev['上报时间'].dt.date.min()
+        max_d = df_dev['上报时间'].dt.date.max()
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input('开始日期', min_d, key='start_date_history')
+        with col2:
+            end_date = st.date_input('结束日期', max_d, key='end_date_history')
+        if start_date > end_date:
+            st.error('开始日期不能晚于结束日期')
             st.markdown("</div>", unsafe_allow_html=True)
-        with coly:
-            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-value'>{len(night_usage)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-label'>夜间用水次数</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-        with colz:
-            status_color = "#e74c3c" if leak else "#2ecc71"
-            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-value' style='color:{status_color};'>{'是' if leak else '否'}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-label'>疑似漏水</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-        
-        # 区间流量数据表格
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("<div class='card-title'>区间用水详情</div>", unsafe_allow_html=True)
-                st.dataframe(iv[['时间计算','区间流量','用水行为']].sort_values('区间流量', ascending=False), 
-                   width='stretch', height=260)
+            return
+        df = df_dev[(df_dev['上报时间'].dt.date >= start_date) & (df_dev['上报时间'].dt.date <= end_date)].copy()
     else:
-        st.info("无异常记录")
-    
+        # 回退本地
+        df = load_csv_safely("water_meter_data.csv")
+        if df.empty or '上报时间' not in df.columns:
+            st.info("暂无数据")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+        df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
+        df = df.dropna(subset=['上报时间']).sort_values('上报时间')
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input('开始日期', df['上报时间'].dt.date.min(), key='start_date_history')
+        with col2:
+            end_date = st.date_input('结束日期', df['上报时间'].dt.date.max(), key='end_date_history')
+        if start_date > end_date:
+            st.error('开始日期不能晚于结束日期')
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+        df = df[(df['上报时间'].dt.date >= start_date) & (df['上报时间'].dt.date <= end_date)].copy()
+
+    if df.empty:
+        st.info('所选范围无数据')
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    # 每日用水统计
+    daily_usage = []
+    for d in pd.date_range(start=start_date, end=end_date):
+        ddf = df[df['上报时间'].dt.date == d.date()].sort_values('上报时间')
+        if len(ddf) >= 2:
+            x = pd.to_numeric(ddf['累计流量'], errors='coerce')
+            du = (x.iloc[0] - x.iloc[-1]) * 1000
+            daily_usage.append((d.date(), du))
+
+    if daily_usage:
+        st.markdown('## 每日用水量统计')
+        x = [d.strftime('%Y-%m-%d') for d, _ in daily_usage]
+        y = [v for _, v in daily_usage]
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Bar(x=x, y=y, marker_color='#3366CC', name='每日用水量(L)'))
+        fig_hist.update_layout(height=380, xaxis_title='日期', yaxis_title='用水量(L)')
+        st.plotly_chart(fig_hist, width='stretch')
+
+        # 单日用水行为图
+        day_options = sorted(df['上报时间'].dropna().dt.date.unique(), reverse=True)
+        if len(day_options) > 0:
+            sel_day_single = st.selectbox('选择某一天绘制用水行为图', day_options, index=0, key='hist_single_day')
+            day_df = df[df['上报时间'].dt.date == sel_day_single].copy()
+            if not day_df.empty:
+                try:
+                    fig_cn = enhanced_cn.create_enhanced_figure_cn(day_df, date_str=sel_day_single.strftime('%Y-%m-%d'))
+                except Exception:
+                    fig_cn = create_enhanced_figure_cn(day_df)
+                if fig_cn is not None:
+                    st.pyplot(fig_cn)
+
+
+    # 行为分布（区间流量阈值）
+    filtered = df.sort_values('上报时间')
+    filtered['累计流量'] = pd.to_numeric(filtered['累计流量'], errors='coerce')
+    filtered['区间流量'] = filtered['累计流量'].diff(-1) * -1000
+    filtered['用水行为'] = '零星用水'
+    filtered.loc[filtered['区间流量'] > 25, '用水行为'] = '冲洗用水'
+    filtered.loc[(filtered['区间流量'] > 6.5) & (filtered['区间流量'] <= 25), '用水行为'] = '桶箱用水'
+
+    valid = filtered[filtered['区间流量'] > 0]
+    if not valid.empty:
+        st.markdown('## 用水行为分布')
+        stats = valid.groupby('用水行为')['区间流量'].agg(['sum','count']).reset_index()
+        stats['百分比'] = stats['sum'] / stats['sum'].sum() * 100
+        fig_pie = go.Figure(data=[go.Pie(labels=stats['用水行为'], values=stats['sum'], hole=.3)])
+        st.plotly_chart(fig_pie, width='stretch')
+
+    st.markdown("<div class='card-title'>异常统计</div>", unsafe_allow_html=True)
+    large_flow_events = (valid['区间流量'] > 50).sum()
+    night_usage_events = valid[(valid['上报时间'].dt.hour >= 23) | (valid['上报时间'].dt.hour <= 5)].shape[0]
+    small_leak_days = (valid['区间流量'] < 1).sum() > 5
+    colx, coly, colz = st.columns(3)
+    with colx:
+        st.metric('异常大流量事件', large_flow_events)
+    with coly:
+        st.metric('夜间用水事件', night_usage_events)
+    with colz:
+        st.metric('疑似漏水', '是' if small_leak_days else '否')
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # -------- 上传分析 --------
@@ -1266,6 +1323,38 @@ def render_data_admin():
     
     col1, col2 = st.columns(2)
     with col1:
+        # 云端数据导出（新增）
+        st.markdown("<div class='card-title'>云端数据导出</div>", unsafe_allow_html=True)
+        cloud_df = fetch_cloud_history(limit=1500)
+        if not cloud_df.empty and '表号' in cloud_df.columns:
+            devs = sorted(cloud_df['表号'].dropna().astype(str).unique())
+            dev_sel = st.selectbox("选择设备(云端)", devs, index=0, key="exp_cloud_dev")
+            # 获取设备完整范围
+            dev_all = fetch_cloud_history(device_no=dev_sel, limit=5000)
+            if not dev_all.empty:
+                min_d = dev_all['上报时间'].dt.date.min()
+                max_d = dev_all['上报时间'].dt.date.max()
+                c1, c2 = st.columns(2)
+                with c1:
+                    sd = st.date_input("开始日期", min_d, key="exp_cloud_start")
+                with c2:
+                    ed = st.date_input("结束日期", max_d, key="exp_cloud_end")
+                if sd <= ed:
+                    base = _get_external_api_base()
+                    url = f"{base}/api/history?deviceNo={dev_sel}&since={sd.strftime('%Y-%m-%d')} 00:00:00&until={ed.strftime('%Y-%m-%d')} 23:59:59&format=csv"
+                    try:
+                        resp = requests.get(url, timeout=20)
+                        if resp.status_code == 200:
+                            st.download_button("下载云端CSV", resp.content, file_name=f"{dev_sel}_{sd.strftime('%Y%m%d')}_{ed.strftime('%Y%m%d')}.csv", mime="text/csv")
+                        else:
+                            st.info("暂不可下载，请稍后重试")
+                    except Exception:
+                        st.info("暂不可下载，请稍后重试")
+            else:
+                st.info("该设备暂无云端数据")
+        else:
+            st.info("云端暂无数据，可切换至本地导出")
+        
         st.markdown("<div class='card-title'>导出数据</div>", unsafe_allow_html=True)
         src_options = ["water_meter_data.csv"]
         if os.path.exists("device_push_data.csv"):
@@ -1502,9 +1591,13 @@ python api_server_local.py
         
         # 调用API获取设备列表
         status_value = status_filter[1] if status_filter else None
-        api_path = f"/api/devices?search={search}" if search else "/api/devices"
+        base_path = "/api/devices"
+        params = []
+        if search:
+            params.append(f"search={search}")
         if status_value and status_value != "all":
-            api_path += f"&status={status_value}"
+            params.append(f"status={status_value}")
+        api_path = base_path + ("?" + "&".join(params) if params else "")
             
         resp = api_get(api_path)
         
@@ -1621,6 +1714,24 @@ python api_server_local.py
                                     st.success(f"设备已{'停用' if selected_device['is_active'] else '激活'}")
                                     # 刷新页面
                                     st.rerun()
+                        
+                        # 删除设备
+                        st.markdown("---")
+                        del_col1, del_col2 = st.columns([3,1])
+                        with del_col1:
+                            st.warning("删除设备将移除设备信息（不影响历史数据）。此操作不可撤销。", icon="⚠️")
+                        with del_col2:
+                            if st.button("删除设备", type="primary", key="delete_device_btn"):
+                                confirm = st.checkbox("我已确认删除该设备", key="confirm_delete")
+                                if not confirm:
+                                    st.warning("请先勾选确认复选框。")
+                                else:
+                                    resp_del = api_delete(f"/api/devices/{selected_device[device_id_col]}")
+                                    if resp_del is not None:
+                                        st.success("设备已删除")
+                                        st.rerun()
+                                    else:
+                                        st.error("删除失败或接口不可用")
         else:
             st.info("暂无设备或无法连接接口")
     
@@ -1876,3 +1987,6 @@ else:
         render_data_admin()
     elif selected == "设备管理":
         render_device_mgmt() 
+
+# ---------------- 云端历史获取工具 ----------------
+# (已在文件上方定义，此处删除重复定义)
