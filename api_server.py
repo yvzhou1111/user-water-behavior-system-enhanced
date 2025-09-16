@@ -277,7 +277,7 @@ def _get_db_conn():
         return None
     retries = 0
     while retries < DB_MAX_RETRIES:
-        try:
+    try:
             conn = psycopg2.connect(DB_URL)
             # 设置连接超时
             conn.set_session(autocommit=True)
@@ -290,10 +290,10 @@ def _get_db_conn():
             else:
                 logger.error(f"数据库连接失败，已达最大重试次数。错误: {e}")
                 return None
-        except Exception as e:
+    except Exception as e:
             logger.error(f"数据库连接失败，错误: {e}")
             return None
-    return None
+        return None
 
 def ensure_device_exists(conn, device_no: str, imei: Optional[str]):
     try:
@@ -846,7 +846,7 @@ async def auth_login(body: LoginInput):
 @app.get("/auth/verify")
 async def auth_verify(token: str):
     try:
-        payload = verify_token(token)
+    payload = verify_token(token)
         username = payload.get("sub", "")
         role = payload.get("role", "")
         return {"ok": True, "username": username, "role": role, "payload": payload}

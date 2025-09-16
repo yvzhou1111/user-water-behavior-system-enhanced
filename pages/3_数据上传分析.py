@@ -41,6 +41,6 @@ if uploaded is not None:
             fig.add_trace(go.Bar(x=valid['上报时间'], y=valid['区间流量'], name='区间用水量(L)', marker_color='rgba(158, 202, 225, .7)', yaxis='y3'))
         fig.update_layout(height=450, xaxis_title='时间', yaxis=dict(title='累计流量(m³)'), yaxis2=dict(title='瞬时流量(m³/h)', overlaying='y', side='right'), yaxis3=dict(overlaying='y', side='right', position=0.95, title='区间用水量(L)'))
         st.plotly_chart(fig, width='stretch')
-        st.dataframe(day, use_container_width=True)
+        st.dataframe(day, width='stretch')
     except Exception as e:
         st.error(f'解析上传文件出错: {e}') 

@@ -28,8 +28,9 @@ def ensure_chinese_font():
         preferred = ['Noto Sans CJK SC', 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
         for fam in preferred:
             if fam in available:
-                plt.rcParams['font.sans-serif'] = [fam, 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
-                plt.rcParams['axes.unicode_minus'] = False
+                matplotlib.rcParams['font.sans-serif'] = [fam, 'DejaVu Sans']
+                matplotlib.rcParams['font.family'] = ['sans-serif']
+                matplotlib.rcParams['axes.unicode_minus'] = False
                 return fam
         # 下载并注册 Noto Sans SC
         font_dir = os.path.join(os.path.dirname(__file__), 'fonts')
@@ -37,7 +38,9 @@ def ensure_chinese_font():
         font_path = os.path.join(font_dir, 'NotoSansSC-Regular.otf')
         if not os.path.exists(font_path):
             urls = [
+                'https://raw.githubusercontent.com/googlefonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
                 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
+                'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
                 'https://fonts.gstatic.com/ea/notosanssc/v1/NotoSansSC-Regular.otf'
             ]
             import urllib.request
@@ -48,13 +51,24 @@ def ensure_chinese_font():
                 except Exception:
                     continue
         if os.path.exists(font_path):
-            font_manager.fontManager.addfont(font_path)
-            # 名称可能为 Noto Sans CJK SC 或 Noto Sans SC，均加入
-            plt.rcParams['font.sans-serif'] = ['Noto Sans CJK SC', 'Noto Sans SC', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
-            plt.rcParams['axes.unicode_minus'] = False
-            return 'Noto Sans SC'
+            try:
+                font_manager.fontManager.addfont(font_path)
+                # 强制刷新字体缓存
+                try:
+                    font_manager._load_fontmanager(try_read_cache=False)
+                except Exception:
+                    pass
+                matplotlib.rcParams['font.sans-serif'] = ['Noto Sans SC', 'Noto Sans CJK SC', 'DejaVu Sans']
+                matplotlib.rcParams['font.family'] = ['sans-serif']
+                matplotlib.rcParams['axes.unicode_minus'] = False
+                return 'Noto Sans SC'
+            except Exception:
+                pass
     except Exception:
         pass
+    # 兜底
+    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    plt.rcParams['font.family'] = ['sans-serif']
     plt.rcParams['axes.unicode_minus'] = False
     return None
 
@@ -492,46 +506,46 @@ def render_login():
         st.markdown("</div>", unsafe_allow_html=True)
         
         st.markdown("<h3 style='text-align: center;'>管理员登录</h3>", unsafe_allow_html=True)
-        with st.form("login_form", clear_on_submit=False):
-            u = st.text_input("用户名", key="login_user", placeholder="请输入用户名")
-            p = st.text_input("密码", type="password", key="login_pass", placeholder="请输入密码")
+    with st.form("login_form", clear_on_submit=False):
+        u = st.text_input("用户名", key="login_user", placeholder="请输入用户名")
+        p = st.text_input("密码", type="password", key="login_pass", placeholder="请输入密码")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            submitted = st.form_submit_button("登录")
+        with col2:
+            demo = st.form_submit_button("演示模式")
+        
+        if submitted:
+            if not u or not p:
+                st.warning("请输入用户名和密码")
+                return
+            if not API_AVAILABLE:
+                st.error("API服务器未运行，无法验证登录信息。请启动API服务或使用演示模式。")
+                return
             
-            col1, col2 = st.columns(2)
-            with col1:
-                submitted = st.form_submit_button("登录")
-            with col2:
-                demo = st.form_submit_button("演示模式")
-            
-            if submitted:
-                if not u or not p:
-                    st.warning("请输入用户名和密码")
-                    return
-                if not API_AVAILABLE:
-                    st.error("API服务器未运行，无法验证登录信息。请启动API服务或使用演示模式。")
-                    return
-                
-                resp = api_post("/auth/login", {"username": u, "password": p}, timeout=8)
-                if resp and resp.get("ok"):
-                    st.session_state.auth = True
-                    st.session_state.role = resp.get("role", "admin")
-                    st.session_state.username = u
-                    st.session_state.token = resp.get("token")
-                    # 将token设置到URL参数中，以便刷新页面时恢复登录状态（新API）
-                    st.query_params["token"] = st.session_state.token
-                    st.success("登录成功")
-                    st.rerun()
-                else:
-                    st.error("登录失败")
-            
-            if demo:
+            resp = api_post("/auth/login", {"username": u, "password": p}, timeout=8)
+            if resp and resp.get("ok"):
                 st.session_state.auth = True
-                st.session_state.role = "demo"
-                st.session_state.username = "演示用户"
-                # 演示模式也设置一个伪token
-                demo_token = "demo_token_12345"
-                st.session_state.token = demo_token
-                st.query_params["token"] = demo_token
-                st.success("已进入演示模式")
+                st.session_state.role = resp.get("role", "admin")
+                st.session_state.username = u
+                st.session_state.token = resp.get("token")
+                # 将token设置到URL参数中，以便刷新页面时恢复登录状态（新API）
+                st.query_params["token"] = st.session_state.token
+                st.success("登录成功")
+                st.rerun()
+            else:
+                st.error("登录失败")
+        
+        if demo:
+            st.session_state.auth = True
+            st.session_state.role = "demo"
+            st.session_state.username = "演示用户"
+            # 演示模式也设置一个伪token
+            demo_token = "demo_token_12345"
+            st.session_state.token = demo_token
+            st.query_params["token"] = demo_token
+            st.success("已进入演示模式")
         
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -765,10 +779,6 @@ def create_enhanced_figure_cn(day_df: pd.DataFrame):
         fig.set_constrained_layout(True)
     except Exception:
         pass
-    try:
-        plt.tight_layout()
-    except Exception:
-        pass
     return fig
 
 # -------- 实时监测 --------
@@ -879,7 +889,7 @@ def render_realtime():
         xaxis2=dict(gridcolor='#f0f0f0', showgrid=True),
         yaxis2=dict(gridcolor='#f0f0f0', showgrid=True)
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # 中文增强图（与历史页一致风格）
     st.markdown("<div class='card-title'>增强图（中文）</div>", unsafe_allow_html=True)
@@ -909,7 +919,7 @@ def render_realtime():
     # 最新数据点
     st.markdown("<div class='card-title'>最新数据</div>", unsafe_allow_html=True)
     last_points = df.tail(5).sort_values('上报时间', ascending=False)
-    st.dataframe(last_points, use_container_width=True, height=200)
+    st.dataframe(last_points, width='stretch', height=200)
     
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -961,7 +971,7 @@ def render_history():
             xaxis=dict(gridcolor='#f0f0f0', showgrid=True),
             yaxis=dict(gridcolor='#f0f0f0', showgrid=True)
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     with col2:
         st.markdown("<div style='text-align: center;'><h4>用水行为分布</h4></div>", unsafe_allow_html=True)
         if not iv.empty:
@@ -980,7 +990,7 @@ def render_history():
                 hole=0.4
             ))
             figp.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10))
-            st.plotly_chart(figp, use_container_width=True)
+            st.plotly_chart(figp, width='stretch')
         else:
             st.info("无有效区间")
     
@@ -1026,7 +1036,7 @@ def render_history():
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("<div class='card-title'>区间用水详情</div>", unsafe_allow_html=True)
         st.dataframe(iv[['时间计算','区间流量','用水行为']].sort_values('区间流量', ascending=False), 
-                    use_container_width=True, height=260)
+                    width='stretch', height=260)
     else:
         st.info("无异常记录")
     
@@ -1103,146 +1113,146 @@ def render_upload_analysis():
             st.error("无法读取文件，请检查格式/编码")
             st.markdown("</div>", unsafe_allow_html=True)
             return
-        
-        df = _normalize(raw)
-        if df.empty or '上报时间' not in df.columns:
-            st.error("无法标准化数据：缺少 '上报时间' 列")
-            st.markdown("</div>", unsafe_allow_html=True)
-            return
-        
-        dates = sorted(df['上报时间'].dt.date.unique(), reverse=True)
-        
-        st.markdown("<div class='card-title'>选择日期</div>", unsafe_allow_html=True)
-        sel = st.selectbox("选择要分析的日期", dates, index=0 if dates else None, format_func=lambda x: x.strftime('%Y-%m-%d'))
-        if not sel:
-            st.markdown("</div>", unsafe_allow_html=True)
-            return
-        
-        day_df = df[df['上报时间'].dt.date == sel]
-        # 与 water_analysis_enhanced_en.py 对齐：关键点法
-        iv = compute_intervals_keypoints(day_df)
-        
-        # 数据统计摘要
-        st.markdown("<div class='card-title'>数据统计摘要</div>", unsafe_allow_html=True)
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-value'>{len(day_df)}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-label'>数据点数量</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-        with col2:
-            time_span = (day_df['上报时间'].max() - day_df['上报时间'].min()).total_seconds() / 3600
-            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-value'>{time_span:.2f}</div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='metric-label'>时间跨度(小时)</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-        with col3:
-            if '累计流量' in day_df.columns and len(day_df) > 1:
-                flow_diff = (day_df['累计流量'].iloc[0] - day_df['累计流量'].iloc[-1]) * 1000
-                st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-value'>{abs(flow_diff):.1f}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-label'>总用水量(L)</div>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-value'>-</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-label'>总用水量(L)</div>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-        with col4:
-            if not iv.empty:
-                intervals = len(iv)
-                st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-value'>{intervals}</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-label'>用水区间数</div>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-value'>0</div>", unsafe_allow_html=True)
-                st.markdown(f"<div class='metric-label'>用水区间数</div>", unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-        
-        # 用水行为分析图（与 water_analysis_enhanced_en.py 逻辑一致）
-        st.markdown("<div class='card-title'>用水行为分析图</div>", unsafe_allow_html=True)
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            # 左侧：累计流量曲线 + 区间用水量柱状图
-            fig = make_subplots(rows=1, cols=1)
-            if '累计流量' in day_df.columns:
-                fig.add_trace(go.Scatter(x=day_df['上报时间'], y=day_df['累计流量'], 
-                                      mode='lines+markers', name='累计流量(m^3)', 
-                                      line=dict(color='#3498db', width=2)))
-            if not iv.empty:
-                # 将关键点的区间量对齐到相应时间点长度
-                x_iv = day_df['上报时间'].iloc[:len(iv)]
-                fig.add_trace(go.Bar(x=x_iv, y=iv['区间流量'], 
-                                  name='区间用水量(L)', marker_color='rgba(52, 152, 219, 0.5)'))
-            fig.update_layout(
-                height=450,
-                margin=dict(l=40, r=40, t=40, b=40),
-                plot_bgcolor='white',
-                paper_bgcolor='white',
-                font=dict(color='#2c3e50'),
-                xaxis=dict(title='时间', gridcolor='#f0f0f0', showgrid=True),
-                yaxis=dict(title='累计流量(m^3)/区间用水量(L)', gridcolor='#f0f0f0', showgrid=True)
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            # 右侧：饼图
-            if not iv.empty:
-                behavior_stats = iv.groupby('用水行为').agg({'区间流量': ['sum', 'mean', 'count']}).reset_index()
-                behavior_stats.columns = ['用水行为', '总量(L)', '平均(L)', '次数']
-                behavior_stats['百分比'] = (behavior_stats['总量(L)'] / max(behavior_stats['总量(L)'].sum(), 1) * 100).round(1).astype(str) + '%'
-                colors = {'冲洗用水': '#e74c3c', '桶箱用水': '#3498db', '零星用水': '#2ecc71'}
-                figp = go.Figure(data=[go.Pie(
-                    labels=behavior_stats['用水行为'],
-                    values=behavior_stats['总量(L)'],
-                    hole=.4,
-                    marker=dict(colors=[colors.get(b, '#95a5a6') for b in behavior_stats['用水行为']]),
-                    textinfo='percent+label'
-                )])
-                figp.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(figp, use_container_width=True)
-            else:
-                st.info("暂无可分析的区间数据")
-
-        # 统一标题为"用水行为分析图"，增强图作为补充
-        st.markdown("<div class='card-title'>用水行为分析图</div>", unsafe_allow_html=True)
-        fig_cn2 = create_enhanced_figure_cn(day_df)
-        if fig_cn2:
-            st.pyplot(fig_cn2, clear_figure=True)
-
-        st.markdown("<div class='card-title'>原始数据预览</div>", unsafe_allow_html=True)
-        with st.expander("展开查看原始数据"):
-            st.dataframe(day_df.tail(100), use_container_width=True, height=300)
-        
-        # 导出分析结果
-        st.markdown("<div class='card-title'>导出分析结果</div>", unsafe_allow_html=True)
-        if not iv.empty:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                csv_bytes = day_df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("导出原始数据", data=csv_bytes, 
-                                  file_name=f"原始数据_{sel.strftime('%Y%m%d')}.csv", 
-                                  mime="text/csv", 
-                                  key="export_raw")
-            with col2:
-                csv_intervals = iv.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("导出区间数据", data=csv_intervals, 
-                                  file_name=f"区间数据_{sel.strftime('%Y%m%d')}.csv", 
-                                  mime="text/csv",
-                                  key="export_intervals")
-            with col3:
-                if fig_cn2:
-                    from io import BytesIO
-                    buf = BytesIO()
-                    fig_cn2.savefig(buf, format="png", dpi=150)
-                    buf.seek(0)
-                    st.download_button("导出增强图", data=buf, 
-                                      file_name=f"增强图_{sel.strftime('%Y%m%d')}.png", 
-                                      mime="image/png",
-                                      key="export_plot")
-        
+    
+    df = _normalize(raw)
+    if df.empty or '上报时间' not in df.columns:
+        st.error("无法标准化数据：缺少 '上报时间' 列")
         st.markdown("</div>", unsafe_allow_html=True)
+        return
+    
+    dates = sorted(df['上报时间'].dt.date.unique(), reverse=True)
+    
+    st.markdown("<div class='card-title'>选择日期</div>", unsafe_allow_html=True)
+    sel = st.selectbox("选择要分析的日期", dates, index=0 if dates else None, format_func=lambda x: x.strftime('%Y-%m-%d'))
+    if not sel:
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+    
+    day_df = df[df['上报时间'].dt.date == sel]
+    # 与 water_analysis_enhanced_en.py 对齐：关键点法
+    iv = compute_intervals_keypoints(day_df)
+    
+    # 数据统计摘要
+    st.markdown("<div class='card-title'>数据统计摘要</div>", unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-value'>{len(day_df)}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>数据点数量</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    with col2:
+        time_span = (day_df['上报时间'].max() - day_df['上报时间'].min()).total_seconds() / 3600
+        st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-value'>{time_span:.2f}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='metric-label'>时间跨度(小时)</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    with col3:
+        if '累计流量' in day_df.columns and len(day_df) > 1:
+            flow_diff = (day_df['累计流量'].iloc[0] - day_df['累计流量'].iloc[-1]) * 1000
+            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-value'>{abs(flow_diff):.1f}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-label'>总用水量(L)</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-value'>-</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-label'>总用水量(L)</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+    with col4:
+        if not iv.empty:
+            intervals = len(iv)
+            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-value'>{intervals}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-label'>用水区间数</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='dashboard-tile'>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-value'>0</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='metric-label'>用水区间数</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # 用水行为分析图（与 water_analysis_enhanced_en.py 逻辑一致）
+    st.markdown("<div class='card-title'>用水行为分析图</div>", unsafe_allow_html=True)
+    col12_left, col12_right = st.columns([2, 1])
+    with col12_left:
+        # 左侧：累计流量曲线 + 区间用水量柱状图
+        fig = make_subplots(rows=1, cols=1)
+        if '累计流量' in day_df.columns:
+            fig.add_trace(go.Scatter(x=day_df['上报时间'], y=day_df['累计流量'], 
+                                     mode='lines+markers', name='累计流量(m^3)', 
+                                     line=dict(color='#3498db', width=2)))
+        if not iv.empty:
+            # 将关键点的区间量对齐到相应时间点长度
+            x_iv = day_df['上报时间'].iloc[:len(iv)]
+            fig.add_trace(go.Bar(x=x_iv, y=iv['区间流量'], 
+                                 name='区间用水量(L)', marker_color='rgba(52, 152, 219, 0.5)'))
+        fig.update_layout(
+            height=450,
+            margin=dict(l=40, r=40, t=40, b=40),
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            font=dict(color='#2c3e50'),
+            xaxis=dict(title='时间', gridcolor='#f0f0f0', showgrid=True),
+            yaxis=dict(title='累计流量(m^3)/区间用水量(L)', gridcolor='#f0f0f0', showgrid=True)
+        )
+        st.plotly_chart(fig, width='stretch')
+    with col12_right:
+        # 右侧：饼图
+        if not iv.empty:
+            behavior_stats = iv.groupby('用水行为').agg({'区间流量': ['sum', 'mean', 'count']}).reset_index()
+            behavior_stats.columns = ['用水行为', '总量(L)', '平均(L)', '次数']
+            behavior_stats['百分比'] = (behavior_stats['总量(L)'] / max(behavior_stats['总量(L)'].sum(), 1) * 100).round(1).astype(str) + '%'
+            colors = {'冲洗用水': '#e74c3c', '桶箱用水': '#3498db', '零星用水': '#2ecc71'}
+            figp = go.Figure(data=[go.Pie(
+                labels=behavior_stats['用水行为'],
+                values=behavior_stats['总量(L)'],
+                hole=.4,
+                marker=dict(colors=[colors.get(b, '#95a5a6') for b in behavior_stats['用水行为']]),
+                textinfo='percent+label'
+            )])
+            figp.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(figp, width='stretch')
+        else:
+            st.info("暂无可分析的区间数据")
+    
+    # 统一标题为"用水行为分析图"，增强图作为补充
+    st.markdown("<div class='card-title'>用水行为分析图</div>", unsafe_allow_html=True)
+    fig_cn2 = create_enhanced_figure_cn(day_df)
+    if fig_cn2:
+        st.pyplot(fig_cn2, clear_figure=True)
+    
+    st.markdown("<div class='card-title'>原始数据预览</div>", unsafe_allow_html=True)
+    with st.expander("展开查看原始数据"):
+        st.dataframe(day_df.tail(100), width='stretch', height=300)
+    
+    # 导出分析结果
+    st.markdown("<div class='card-title'>导出分析结果</div>", unsafe_allow_html=True)
+    if not iv.empty:
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            csv_bytes = day_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("导出原始数据", data=csv_bytes, 
+                              file_name=f"原始数据_{sel.strftime('%Y%m%d')}.csv", 
+                              mime="text/csv", 
+                              key="export_raw")
+        with col2:
+            csv_intervals = iv.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("导出区间数据", data=csv_intervals, 
+                              file_name=f"区间数据_{sel.strftime('%Y%m%d')}.csv", 
+                              mime="text/csv",
+                              key="export_intervals")
+        with col3:
+            if fig_cn2:
+                from io import BytesIO
+                buf = BytesIO()
+                fig_cn2.savefig(buf, format="png", dpi=150)
+                buf.seek(0)
+                st.download_button("导出增强图", data=buf, 
+                                  file_name=f"增强图_{sel.strftime('%Y%m%d')}.png", 
+                                  mime="image/png",
+                                  key="export_plot")
+    
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # -------- 数据管理 --------
 
@@ -1322,7 +1332,7 @@ def render_data_admin():
         else:
             st.info("暂无可导出数据")
 
-        with col2:
+    with col2:
             st.markdown("<div class='card-title'>删除数据</div>", unsafe_allow_html=True)
             st.warning("⚠️ 此操作将永久删除指定日期范围内的数据，无法撤销！", icon="⚠️")
             
@@ -1458,7 +1468,7 @@ python api_server_local.py
         
         st.markdown("</div>", unsafe_allow_html=True)
         return
-    
+
     info = api_get("/public_info")
     # 本地存储版不再依赖数据库，若检测到 db_enabled=False，提示为"本地存储已启用"，不阻断设备管理
     if info and info.get("storage_type") == "local_file":
@@ -1515,7 +1525,7 @@ python api_server_local.py
                     "data_count": st.column_config.NumberColumn("数据点数"),
                     "last_data": st.column_config.DatetimeColumn("最后数据时间", format="YYYY-MM-DD HH:mm")
                 },
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
                 height=400,
                 key="devices_table"
@@ -1696,7 +1706,7 @@ python api_server_local.py
                 
                 # 预览数据
                 st.markdown("### 数据预览")
-                st.dataframe(df.head(10), use_container_width=True)
+                st.dataframe(df.head(10), width='stretch')
                 
                 # 确认导入
                 if st.button("确认导入", key="confirm_bulk_import"):

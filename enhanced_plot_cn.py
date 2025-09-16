@@ -27,7 +27,9 @@ try:
         if not os.path.exists(font_path):
             import urllib.request
             for u in [
+                'https://raw.githubusercontent.com/googlefonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
                 'https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
+                'https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/OTF/SimplifiedChinese/NotoSansSC-Regular.otf',
                 'https://fonts.gstatic.com/ea/notosanssc/v1/NotoSansSC-Regular.otf'
             ]:
                 try:
@@ -37,11 +39,17 @@ try:
                     continue
         if os.path.exists(font_path):
             font_manager.fontManager.addfont(font_path)
+            try:
+                font_manager._load_fontmanager(try_read_cache=False)
+            except Exception:
+                pass
             fam = 'Noto Sans SC'
     if fam:
-        matplotlib.rcParams['font.sans-serif'] = [fam,'SimHei','Microsoft YaHei','Arial Unicode MS','DejaVu Sans']
+        matplotlib.rcParams['font.sans-serif'] = [fam,'DejaVu Sans']
+        matplotlib.rcParams['font.family'] = ['sans-serif']
 except Exception:
-    matplotlib.rcParams['font.sans-serif'] = ['SimHei','Microsoft YaHei','SimSun','DejaVu Sans']
+    matplotlib.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    matplotlib.rcParams['font.family'] = ['sans-serif']
 
 matplotlib.rcParams['axes.unicode_minus'] = False
 
@@ -81,7 +89,7 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
             df[col] = pd.to_numeric(df[col], errors='coerce')
     df['上报时间'] = pd.to_datetime(df['上报时间'], errors='coerce')
     df['时间计算'] = df['上报时间'].dt.time
-    # 数据L/s (瞬时流量 m³/h -> L/s)
+    # 数据L/s (瞬时流量 m^3/h -> L/s)
     if '瞬时流量' in df.columns:
         df['数据L/s'] = df['瞬时流量'] / 3.6
     else:
@@ -244,6 +252,13 @@ def create_enhanced_figure_cn(df_day: pd.DataFrame, date_str: str = None) -> plt
         fig.text(0.02, 0.02, stats_text, fontsize=11, 
                  bbox=dict(facecolor='white', alpha=0.9, boxstyle='round,pad=0.6', edgecolor='#3498DB', linewidth=1.2))
 
-    fig.tight_layout()
-    fig.subplots_adjust(top=0.92)
+    try:
+        fig.set_constrained_layout(True)
+    except Exception:
+        pass
+    try:
+        fig.tight_layout()
+        fig.subplots_adjust(top=0.92)
+    except Exception:
+        pass
     return fig 
